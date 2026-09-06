@@ -12,7 +12,7 @@ import {
   codexBackupsDir
 } from './constants.js';
 import { exists, ensureDir, writeAtomic } from '../shared/fs-utils.js';
-import { readSnapshotManifest, listBackups } from './snapshot.js';
+import { readSnapshotManifest, listBackups, takeBackup } from './snapshot.js';
 import { appendAuditEvent } from './audit.js';
 
 /**
@@ -126,16 +126,38 @@ export async function revertToPreClaudex(opts = {}) {
 /**
  * Restore from a specific timestamped backup directory.
  * `id` can be 'latest' or a specific ISO-stamped backup name.
+ *
+ * Safety:
+ *   - Incomplete backups (no hashes.json) are never restored. 'latest'
+ *     resolves to the newest COMPLETE backup; an explicit id that is
+ *     incomplete throws.
+ *   - The current files are backed up first (reason "pre-restore <id>"),
+ *     so a restore is itself undoable via `restore latest`.
+ *     Pass `preBackup: false` to skip (tests / callers that already did).
  */
 export async function restoreBackup(id, opts = {}) {
   const backups = await listBackups(opts);
   if (backups.length === 0) {
     throw new Error('no backups available');
   }
-  const target =
-    id === 'latest' || !id ? backups[0] : backups.find((b) => b.id === id);
-  if (!target) {
-    throw new Error(`backup not found: ${id}`);
+  let target;
+  if (id === 'latest' || !id) {
+    target = backups.find((b) => b.complete);
+    if (!target) {
+      throw new Error(
+        `no complete backup available (${backups.length} incomplete dir(s) found — run codexx use to create a fresh backup)`
+      );
+    }
+  } else {
+    target = backups.find((b) => b.id === id);
+    if (!target) {
+      throw new Error(`backup not found: ${id}`);
+    }
+    if (!target.complete) {
+      throw new Error(
+        `backup ${id} is incomplete (missing hashes.json) — refusing to restore from it`
+      );
+    }
   }
 
   const configPath = opts.configTomlPath || codexConfigTomlPath();
@@ -143,6 +165,16 @@ export async function restoreBackup(id, opts = {}) {
   const envPath = opts.envFilePath || codexEnvFilePath();
   const restored = { config_toml: false, auth_json: false, env_file: false };
   const deleted = { config_toml: false, auth_json: false, env_file: false };
+
+  let preBackupDir = null;
+  if (opts.preBackup !== false) {
+    preBackupDir = await takeBackup(`pre-restore ${target.id}`, {
+      root: opts.root,
+      configTomlPath: configPath,
+      authJsonPath: authPath,
+      envFilePath: envPath
+    });
+  }
 
   for (const [key, fileName, filePath, mode] of [
     ['config_toml', 'config.toml', configPath, undefined],
@@ -162,10 +194,10 @@ export async function restoreBackup(id, opts = {}) {
 
   if (opts.appendAudit !== false) {
     await appendAuditEvent(
-      { action: 'restore', backup_id: target.id, restored, deleted },
+      { action: 'restore', backup_id: target.id, pre_backup_dir: preBackupDir, restored, deleted },
       opts.auditOpts
     );
   }
 
-  return { id: target.id, dir: target.dir, restored, deleted };
+  return { id: target.id, dir: target.dir, preBackupDir, restored, deleted };
 }

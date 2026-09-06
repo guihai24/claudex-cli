@@ -846,7 +846,31 @@ async function cmdSnapshot(args, lang) {
 async function cmdRestore(args, lang) {
   const flags = parseFlags(args);
   const id = flags._[0] || 'latest';
-  const result = await restoreBackup(id);
+  // Resolve the target up front so the prompt names the actual backup and
+  // an incomplete/missing id fails before the user is asked anything.
+  const backups = await listBackups();
+  const target = id === 'latest'
+    ? backups.find((b) => b.complete)
+    : backups.find((b) => b.id === id);
+  if (!target || !target.complete) {
+    // restoreBackup throws the precise message; reuse it.
+    await restoreBackup(id);
+    return 1;
+  }
+  if (!flags.yes) {
+    const rl = readline.createInterface({ input, output });
+    let ans;
+    try {
+      ans = (await rl.question(t(lang, 'restoreConfirm', { v: target.id }))).trim().toLowerCase();
+    } finally {
+      rl.close();
+    }
+    if (ans !== 'y' && ans !== 'yes') {
+      process.stdout.write(t(lang, 'canceled') + '\n');
+      return 0;
+    }
+  }
+  const result = await restoreBackup(target.id);
   process.stdout.write(t(lang, 'restoreOk', { v: result.id }) + '\n');
   return 0;
 }

@@ -129,7 +129,8 @@ export async function takeBackup(reason, opts = {}) {
     path.join(dir, 'reason.txt'),
     `${reason || 'unspecified'}\n`
   );
-  await writeJson(path.join(dir, 'hashes.json'), {
+  // Must stay the LAST write in this function — see listBackups.
+  await writeJson(path.join(dir, BACKUP_MANIFEST_FILE), {
     ts: stamp,
     reason: reason || null,
     hashes
@@ -138,9 +139,18 @@ export async function takeBackup(reason, opts = {}) {
   return dir;
 }
 
+/** Written last by takeBackup, so its presence marks a backup as complete. */
+export const BACKUP_MANIFEST_FILE = 'hashes.json';
+
 /**
  * List all timestamped backups, newest first.
- * Each entry: { id (=basename), dir, manifest? }.
+ * Each entry: { id (=basename), dir, complete }.
+ *
+ * `complete` is false when hashes.json is missing — i.e. takeBackup was
+ * interrupted between ensureDir and its final write. Such directories are
+ * still listed so pruneBackups can clean them up, but restoreBackup must
+ * refuse them: a backup with no config.toml would otherwise be read as
+ * "config.toml did not exist" and the live file would be deleted.
  */
 export async function listBackups(opts = {}) {
   const root = opts.root || codexBackupsDir();
@@ -151,7 +161,8 @@ export async function listBackups(opts = {}) {
     const full = path.join(root, name);
     const stat = await fsp.stat(full);
     if (!stat.isDirectory()) continue;
-    filtered.push({ id: name, dir: full });
+    const complete = await exists(path.join(full, BACKUP_MANIFEST_FILE));
+    filtered.push({ id: name, dir: full, complete });
   }
   // newest first by id (ISO timestamps sort chronologically as strings)
   filtered.sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));

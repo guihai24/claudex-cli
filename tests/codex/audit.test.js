@@ -94,6 +94,7 @@ test('writeLastKnownHashes + read: round-trip', async () => {
     {
       config_toml_hash: 'aaa',
       auth_json_hash: 'bbb',
+      env_file_hash: 'eee',
       agents_md_hash: 'ccc',
       recorded_at: '2026-05-17T10:00:00Z'
     },
@@ -102,6 +103,7 @@ test('writeLastKnownHashes + read: round-trip', async () => {
   const back = await readLastKnownHashes({ path: file });
   assert.equal(back.config_toml_hash, 'aaa');
   assert.equal(back.auth_json_hash, 'bbb');
+  assert.equal(back.env_file_hash, 'eee');
   assert.equal(back.agents_md_hash, 'ccc');
   assert.equal(back.recorded_at, '2026-05-17T10:00:00Z');
   assert.equal(back.schema_version, 1);
@@ -114,6 +116,7 @@ test('writeLastKnownHashes: fills missing fields with null + default recorded_at
   const back = await readLastKnownHashes({ path: file });
   assert.equal(back.config_toml_hash, 'h');
   assert.equal(back.auth_json_hash, null);
+  assert.equal(back.env_file_hash, null);
   assert.equal(back.agents_md_hash, null);
   assert.ok(back.recorded_at);
 });

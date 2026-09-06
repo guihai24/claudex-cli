@@ -30,12 +30,27 @@ export async function readText(file) {
   return fsp.readFile(file, 'utf8');
 }
 
+/**
+ * Write `content` to `file` via a same-directory temp file + rename.
+ *
+ * Mode resolution:
+ *   - `options.mode` given → use it.
+ *   - else target already exists → preserve its current permission bits.
+ *     Codex writes ~/.codex/config.toml as 0600; rename() would otherwise
+ *     replace it with a fresh 0644 inode and silently widen the permissions.
+ *   - else → process default (0666 & ~umask).
+ */
 export async function writeAtomic(file, content, options = {}) {
   await ensureDir(path.dirname(file));
   const tmp = `${file}.codexx-tmp.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}`;
-  const mode = options.mode;
-  const writeOpts = { encoding: 'utf8' };
-  if (mode !== undefined) writeOpts.mode = mode;
+  let mode = options.mode;
+  if (mode === undefined) {
+    try {
+      mode = (await fsp.stat(file)).mode & 0o777;
+    } catch {
+      // target does not exist yet — fall through to the process default
+    }
+  }
   let fd;
   try {
     fd = await fsp.open(tmp, 'w', mode);

@@ -84,6 +84,26 @@ test('writeAtomic: replaces existing file content atomically', async () => {
   assert.equal(await fsp.readFile(file, 'utf8'), 'new content');
 });
 
+test('writeAtomic: preserves the existing file mode when no mode option given', async () => {
+  if (process.platform === 'win32') return;
+  const dir = await mktemp();
+  const file = path.join(dir, 'config.toml');
+  await fsp.writeFile(file, 'model = "a"\n', { mode: 0o600 });
+  await writeAtomic(file, 'model = "b"\n');
+  const stat = await fsp.stat(file);
+  assert.equal(stat.mode & 0o777, 0o600, 'rename() must not widen 0600 → 0644');
+});
+
+test('writeAtomic: explicit mode option wins over the existing file mode', async () => {
+  if (process.platform === 'win32') return;
+  const dir = await mktemp();
+  const file = path.join(dir, 'f.txt');
+  await fsp.writeFile(file, 'x', { mode: 0o644 });
+  await writeAtomic(file, 'y', { mode: 0o600 });
+  const stat = await fsp.stat(file);
+  assert.equal(stat.mode & 0o777, 0o600);
+});
+
 test('writeAtomic: creates parent directory if missing', async () => {
   const dir = await mktemp();
   const file = path.join(dir, 'a', 'b', 'c.txt');

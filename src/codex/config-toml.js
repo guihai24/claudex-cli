@@ -87,6 +87,39 @@ export function findClaudexSections(raw) {
 }
 
 /**
+ * Locate a `[model_providers.claudex-<name>]` table that is NOT wrapped in
+ * BEGIN/END markers — an "orphan".
+ *
+ * Orphans appear because the Codex Desktop App re-serialises config.toml
+ * whenever it writes to it (project trust, plugins, mcp_servers, …), and TOML
+ * serialisers drop comments. The table survives; our markers do not. Without
+ * this lookup, applyClaudexProvider would take the `insert` path and append a
+ * second definition of the same table, which strict TOML rejects with
+ * "trying to redefine an already defined table or value".
+ *
+ * The `claudex-` prefix is reserved (isValidProviderName rejects names that
+ * start with it), so matching on the prefix cannot claim a user-authored table.
+ *
+ * Returns { providerName, startLine, endLine } or null.
+ */
+export function findOrphanClaudexSection(raw, providerName) {
+  const targetHeader = `model_providers.${toClaudexProviderId(providerName)}`;
+  const headers = findAllSectionHeaders(raw);
+  const target = headers.find((h) => h.header === targetHeader);
+  if (!target) return null;
+  // If it already sits inside a marker block, it is not an orphan.
+  const covered = findClaudexSections(raw).some(
+    (s) => target.headerLine > s.beginLine && target.headerLine < s.endLine
+  );
+  if (covered) return null;
+  return {
+    providerName,
+    startLine: target.headerLine,
+    endLine: findOrphanSectionEnd(splitLines(raw), target.headerLine, headers)
+  };
+}
+
+/**
  * Build a marker-delimited section block (no trailing newline) for a provider.
  * @param {object} provider — codexx provider metadata
  * @param {object} [opts] — { ts?: Date | string }
@@ -126,7 +159,8 @@ export function buildClaudexBlock(provider, opts = {}) {
 /**
  * Insert or replace the claudex-managed section for a provider and set
  * top-level `model` and `model_provider` to point at it.
- * @returns { next: string, diff: { action: 'insert'|'update', providerName: string, topLevelChanges: object } }
+ * @returns { next: string, diff: { action: 'insert'|'update', providerName: string, topLevelChanges: object, adopted: boolean } }
+ *   `adopted` is true when an unmarked orphan table was re-claimed in place.
  */
 export function applyClaudexProvider(raw, provider, opts = {}) {
   parseConfigToml(raw); // guard
@@ -147,17 +181,19 @@ export function applyClaudexProvider(raw, provider, opts = {}) {
     (s) => s.providerName === provider.name
   );
   let action;
+  let adopted = false;
   if (existing) {
     next = replaceLineRange(next, existing.beginLine, existing.endLine, block);
     action = 'update';
   } else {
-    // Markers may have been stripped/corrupted by an external edit while the
-    // table itself survived — inserting blindly would redefine the table and
-    // fail TOML validation. Adopt the orphaned section instead.
-    const orphan = findOrphanClaudexSection(next, claudexId);
+    // No markers — but the table may still be there, stripped of its comments
+    // by an external rewrite. Replace it in place rather than appending a
+    // duplicate definition. See findOrphanClaudexSection.
+    const orphan = findOrphanClaudexSection(next, provider.name);
     if (orphan) {
-      next = replaceLineRange(next, orphan.fromLine, orphan.toLine, block);
+      next = replaceLineRange(next, orphan.startLine, orphan.endLine, block);
       action = 'update';
+      adopted = true;
     } else {
       next = insertAtAnchor(next, block);
       action = 'insert';
@@ -167,7 +203,7 @@ export function applyClaudexProvider(raw, provider, opts = {}) {
   parseConfigToml(next); // post-validate parses
   return {
     next,
-    diff: { action, providerName: provider.name, topLevelChanges }
+    diff: { action, providerName: provider.name, topLevelChanges, adopted }
   };
 }
 
@@ -180,10 +216,21 @@ export function removeClaudexProvider(raw, providerName) {
   parseConfigToml(raw);
   const sections = findClaudexSections(raw);
   const target = sections.find((s) => s.providerName === providerName);
-  if (!target) return { next: raw, diff: { action: 'noop', providerName } };
-  const next = deleteLineRange(raw, target.beginLine, target.endLine);
-  parseConfigToml(next);
-  return { next, diff: { action: 'remove', providerName } };
+  if (target) {
+    const next = deleteLineRange(raw, target.beginLine, target.endLine);
+    parseConfigToml(next);
+    return { next, diff: { action: 'remove', providerName, adopted: false } };
+  }
+  // Markers may have been stripped externally; the table itself can still be
+  // there. Leaving it behind would collide with a later re-add of the same
+  // provider, so remove the orphan too.
+  const orphan = findOrphanClaudexSection(raw, providerName);
+  if (orphan) {
+    const next = deleteLineRange(raw, orphan.startLine, orphan.endLine);
+    parseConfigToml(next);
+    return { next, diff: { action: 'remove', providerName, adopted: true } };
+  }
+  return { next: raw, diff: { action: 'noop', providerName, adopted: false } };
 }
 
 /**
@@ -379,6 +426,24 @@ function findSectionEndLine(lines, headerLine, allHeaders) {
   // end is the line just before next section header, excluding trailing blank lines
   let end = next.headerLine - 1;
   while (end > headerLine && lines[end].trim() === '') end--;
+  return end;
+}
+
+/**
+ * Last key/value line belonging to the section that starts at `headerLine`.
+ * Unlike findSectionEndLine this also skips trailing comment lines, so an
+ * orphan section immediately followed by another block's BEGIN marker does not
+ * swallow that marker when replaced.
+ */
+function findOrphanSectionEnd(lines, headerLine, allHeaders) {
+  const next = allHeaders.find((h) => h.headerLine > headerLine);
+  const limit = next ? next.headerLine - 1 : lines.length - 1;
+  let end = headerLine;
+  for (let i = headerLine + 1; i <= limit; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed === '' || trimmed.startsWith('#')) continue;
+    end = i;
+  }
   return end;
 }
 

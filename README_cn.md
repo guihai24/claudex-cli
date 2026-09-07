@@ -30,7 +30,7 @@ one-liner: 一条命令切换 Claude Code 与 OpenAI Codex 的服务商，不用
 language: Node.js
 min_runtime: node >= 18.0.0
 package_manager: npm
-install: npm i -g git+https://github.com/huaguihai/claudex-cli.git#main
+install: npm i -g git+https://github.com/guihai24/claudex-cli.git#main
 verify: claudex --help
 config_file: ~/.claude/settings.<name>.json; ~/.config/claudex-cli/current-provider; ~/.codex/config.toml (codexx, 规划中)
 entry: bin/claudex.js (claudex); bin/codexx.js (codexx, 规划中)
@@ -45,7 +45,7 @@ node -v
 # 要求: >= 18
 
 # 2) 安装
-npm i -g git+https://github.com/huaguihai/claudex-cli.git#main
+npm i -g git+https://github.com/guihai24/claudex-cli.git#main
 
 # 3) 初始化（写入 shell helper + 创建全局 Claude 配置）
 claudex init
@@ -189,13 +189,13 @@ graph LR
 ### 全局安装
 
 ```bash
-npm i -g git+https://github.com/huaguihai/claudex-cli.git#main
+npm i -g git+https://github.com/guihai24/claudex-cli.git#main
 ```
 
 ### 源码运行
 
 ```bash
-git clone https://github.com/huaguihai/claudex-cli.git
+git clone https://github.com/guihai24/claudex-cli.git
 cd claudex-cli
 node ./bin/claudex.js --help
 ```
@@ -347,7 +347,7 @@ claudex native off               # 关闭持久 Native 模式
 claudex native status            # 查看 Native 状态
 claudex native profile [name]    # 设置或交互选择模式
 claudex native doctor            # 查看 Native 检查结果
-claudex update [--from-local <path>] [--from-npm]
+claudex update [--from-local <path>]
 claudex doctor [--provider <name>]
 claudex run [claude args...]     # 透传给 claude
 claudex stats [--week|--month|--year|--since DATE] [--json] [--idle-gap 5m]   # token 用量与活跃度统计（基于 ccusage）
@@ -355,7 +355,7 @@ claudex stats [--week|--month|--year|--since DATE] [--json] [--idle-gap 5m]   # 
 
 `claudex stats` 读取 Claude Code 的本地会话记录，调用内置的 [`ccusage`](https://github.com/ryoppippi/ccusage) 取 token 总量，再补上 ccusage 没有的活跃度指标（按 5 分钟空闲阈值估算活跃时长、活跃天数、连续打卡、最活跃时段）和每日趋势。`--json` 输出原始报告。`claudex init` 还会安装一个 `/stats` slash 命令，可在 Claude Code 会话里直接运行（直接敲 `!claudex stats` 也行，且不经模型）。
 
-更新源：`claudex update` 默认从 GitHub 拉取。加 `--from-npm` 走 npm registry。更新成功后还会自动刷新 shell 包装（相当于替你跑一次 `claudex init`）。
+更新源：`claudex update` 从 GitHub（`guihai24/claudex-cli#main`）拉取。更新成功后还会自动刷新 shell 包装（相当于替你跑一次 `claudex init`）。**不要**从 npm registry 安装——那上面的 `claudex-cli` 是另一个同名的无关项目，装上会把本工具整个替换掉。
 
 ## 配置参考
 
@@ -436,7 +436,7 @@ claudex stats [--week|--month|--year|--since DATE] [--json] [--idle-gap 5m]   # 
 → Node 解析裸 `claude` 时只会补 `.exe`，因此会跳过 npm 的 `claude.cmd`/`claude.ps1`，命中 WinGet 装的旧 `claude.exe`。`claudex` 现在会复刻 shell 的 `PATH`/`PATHEXT` 查找，启动与你交互式敲 `claude` **完全一致**的那一份（用你的 `node` 直接跑 npm 安装包里的 `cli.js`）。请保证 npm 全局 bin（如 `%APPDATA%\npm`）在 `PATH` 中排在 WinGet 路径前面。
 
 **Windows：`claudex update` 报 `spawn npm ENOENT`**
-→ 同一类根因：Node 无法解析 npm 的 `npm.cmd`/`npm.ps1`（没有 `npm.exe`）。`claudex update` 现在会用你的 `node` 直接跑 npm（以及更新后的 `claudex init`）的 `cli.js`，无需 shell 即可工作。若你用的是修复前的版本，先手动更新一次：`npm i -g git+https://github.com/huaguihai/claudex-cli.git#main`。
+→ 同一类根因：Node 无法解析 npm 的 `npm.cmd`/`npm.ps1`（没有 `npm.exe`）。`claudex update` 现在会用你的 `node` 直接跑 npm（以及更新后的 `claudex init`）的 `cli.js`，无需 shell 即可工作。若你用的是修复前的版本，先手动更新一次：`npm i -g git+https://github.com/guihai24/claudex-cli.git#main`。
 
 ---
 
@@ -450,7 +450,7 @@ claudex stats [--week|--month|--year|--since DATE] [--json] [--idle-gap 5m]   # 
 
 ```bash
 # 1) 和 claudex 同一个安装
-npm i -g git+https://github.com/huaguihai/claudex-cli.git#main
+npm i -g git+https://github.com/guihai24/claudex-cli.git#main
 
 # 2) 初始化 state 目录 + 检测 codex
 codexx init

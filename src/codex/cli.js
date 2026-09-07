@@ -1169,7 +1169,7 @@ async function cmdUpdate(args, lang) {
     const spawnOpts = shell ? { stdio: 'inherit', shell: true } : { stdio: 'inherit' };
     const child = spawn(
       file,
-      [...prefixArgs, 'install', '-g', 'git+https://github.com/huaguihai/claudex-cli.git#main'],
+      [...prefixArgs, 'install', '-g', 'git+https://github.com/guihai24/claudex-cli.git#main'],
       spawnOpts
     );
     child.on('exit', (code) => resolve(code ?? 0));

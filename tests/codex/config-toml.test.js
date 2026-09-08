@@ -5,6 +5,7 @@ import {
   parseConfigToml,
   findAllSectionHeaders,
   findClaudexSections,
+  findOrphanClaudexSection,
   buildClaudexBlock,
   applyClaudexProvider,
   removeClaudexProvider,
@@ -453,6 +454,126 @@ trust_level = "trusted"
   assert.equal(parsed.model_providers.custom.base_url, 'https://existing.example.com');
   assert.equal(parsed.projects['/repo'].trust_level, 'trusted');
   assert.equal(parsed.model_providers?.['claudex-openrouter'], undefined);
+});
+
+// ===== orphan tables (markers stripped by an external TOML re-serialisation) =====
+//
+// The Codex Desktop App rewrites config.toml through a TOML serialiser, which
+// drops every comment — including our BEGIN/END markers — but keeps the
+// [model_providers.claudex-*] tables. These tests feed exactly that shape.
+
+function stripComments(raw) {
+  return raw.split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
+}
+
+test('findOrphanClaudexSection: finds an unmarked claudex table and its extent', () => {
+  const raw = stripComments(applyClaudexProvider('', PROVIDER_BAR, buildOpts).next);
+  assert.equal(findClaudexSections(raw).length, 0, 'precondition: no markers left');
+  const orphan = findOrphanClaudexSection(raw, 'bar');
+  assert.ok(orphan);
+  assert.equal(orphan.providerName, 'bar');
+  const lines = raw.split('\n');
+  assert.equal(lines[orphan.startLine], '[model_providers.claudex-bar]');
+  assert.match(lines[orphan.endLine], /^model_reasoning_effort = "high"$/);
+});
+
+test('findOrphanClaudexSection: null when table is inside a marker block', () => {
+  const raw = applyClaudexProvider('', PROVIDER_BAR, buildOpts).next;
+  assert.equal(findOrphanClaudexSection(raw, 'bar'), null);
+});
+
+test('findOrphanClaudexSection: null when table is absent', () => {
+  assert.equal(findOrphanClaudexSection('model = "x"\n', 'bar'), null);
+});
+
+test('applyClaudexProvider: re-applying after markers were stripped adopts the orphan instead of duplicating the table', () => {
+  const marked = applyClaudexProvider('', PROVIDER_BAR, buildOpts).next;
+  const stripped = stripComments(marked);
+  // Old behaviour: insert path → duplicate [model_providers.claudex-bar] → strict parser throws.
+  const r = applyClaudexProvider(stripped, { ...PROVIDER_BAR, model: 'bar-model-2' }, buildOpts);
+  assert.equal(r.diff.action, 'update');
+  assert.equal(r.diff.adopted, true);
+  const parsed = parseConfigToml(r.next);
+  assert.equal(parsed.model, 'bar-model-2');
+  assert.equal(parsed.model_providers['claudex-bar'].base_url, PROVIDER_BAR.base_url);
+  // Markers are back, exactly one pair
+  assert.equal(findClaudexSections(r.next).length, 1);
+  assert.equal((r.next.match(/\[model_providers\.claudex-bar\]/g) || []).length, 1);
+});
+
+test('applyClaudexProvider: adopted=false on the normal marked path', () => {
+  const marked = applyClaudexProvider('', PROVIDER_BAR, buildOpts).next;
+  const r = applyClaudexProvider(marked, PROVIDER_BAR, buildOpts);
+  assert.equal(r.diff.action, 'update');
+  assert.equal(r.diff.adopted, false);
+});
+
+test('applyClaudexProvider: adopting one orphan leaves neighbouring orphans and user sections intact', () => {
+  const userConfig = `model = "gpt-5"
+model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://existing.example.com"
+env_key = "OPENAI_API_KEY"
+
+[projects."/repo"]
+trust_level = "trusted"
+`;
+  let raw = userConfig;
+  raw = applyClaudexProvider(raw, PROVIDER_FOO, buildOpts).next;
+  raw = applyClaudexProvider(raw, PROVIDER_BAR, buildOpts).next;
+  const stripped = stripComments(raw); // both foo and bar are now orphans
+  const r = applyClaudexProvider(stripped, PROVIDER_FOO, buildOpts);
+  assert.equal(r.diff.adopted, true);
+  const parsed = parseConfigToml(r.next);
+  assert.equal(parsed.model_provider, 'claudex-foo');
+  assert.ok(parsed.model_providers['claudex-foo']);
+  assert.ok(parsed.model_providers['claudex-bar'], 'bar orphan untouched');
+  assert.equal(parsed.model_providers.custom.base_url, 'https://existing.example.com');
+  assert.equal(parsed.projects['/repo'].trust_level, 'trusted');
+  const ok = verifyNonClaudexUntouched(stripped, r.next);
+  assert.equal(ok.ok, true, JSON.stringify(ok.changedKeys));
+});
+
+test('applyClaudexProvider: orphan immediately followed by a marked block does not swallow that block', () => {
+  // foo lost its markers; bar (directly below, no blank line) still has them.
+  const mixed = `model = "foo-model"
+model_provider = "claudex-foo"
+
+[model_providers.claudex-foo]
+name = "foo"
+base_url = "https://api.foo.com/v1"
+wire_api = "chat"
+requires_openai_auth = true
+env_key = "OPENAI_API_KEY"
+# claudex-cli managed BEGIN — provider=bar schema=v1 ts=${FIXED_TS}
+[model_providers.claudex-bar]
+name = "bar"
+base_url = "https://api.bar.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+env_key = "OPENAI_API_KEY"
+# claudex-cli managed END
+`;
+  assert.equal(findClaudexSections(mixed).length, 1, 'precondition: only bar is marked');
+
+  const r = applyClaudexProvider(mixed, PROVIDER_FOO, buildOpts);
+  assert.equal(r.diff.adopted, true);
+  const sections = findClaudexSections(r.next);
+  assert.deepEqual(sections.map((s) => s.providerName).sort(), ['bar', 'foo']);
+  const parsed = parseConfigToml(r.next);
+  assert.equal(parsed.model_providers['claudex-bar'].base_url, 'https://api.bar.com/v1');
+});
+
+test('removeClaudexProvider: removes an orphan table so a later re-add cannot collide', () => {
+  const stripped = stripComments(applyClaudexProvider('', PROVIDER_BAR, buildOpts).next);
+  const { next, diff } = removeClaudexProvider(stripped, 'bar');
+  assert.equal(diff.action, 'remove');
+  assert.equal(diff.adopted, true);
+  const parsed = parseConfigToml(next);
+  assert.equal(parsed.model_providers?.['claudex-bar'], undefined);
+  // and re-adding is clean
+  assert.equal(applyClaudexProvider(next, PROVIDER_BAR, buildOpts).diff.action, 'insert');
 });
 
 // ===== verifyNonClaudexUntouched =====

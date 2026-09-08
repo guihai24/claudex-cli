@@ -173,6 +173,24 @@ test('listBackups: empty when dir missing', async () => {
   });
 });
 
+test('listBackups: flags complete vs incomplete (hashes.json missing) but lists both', async () => {
+  const codexHome = await mktemp('codex-home-');
+  const claudexDir = await mktemp('claudex-dir-');
+  await fakeCodexHome(codexHome, { 'config.toml': 'model = "x"\n' });
+  await withEnv({ CODEX_HOME: codexHome, CLAUDEX_CONFIG_DIR: claudexDir }, async () => {
+    const completeDir = await takeBackup('full');
+    // Simulate takeBackup interrupted right after ensureDir
+    const root = path.join(claudexDir, 'codex-backups');
+    await fsp.mkdir(path.join(root, '2099-01-01T00-00-00.000Z'), { recursive: true });
+    const backups = await listBackups();
+    assert.equal(backups.length, 2, 'incomplete dir must still be listed (pruneBackups needs it)');
+    assert.equal(backups[0].id, '2099-01-01T00-00-00.000Z');
+    assert.equal(backups[0].complete, false);
+    assert.equal(backups[1].dir, completeDir);
+    assert.equal(backups[1].complete, true);
+  });
+});
+
 // ===== pruneBackups =====
 
 test('pruneBackups: keeps recent N and recent-by-days', async () => {

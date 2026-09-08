@@ -209,7 +209,7 @@ function validateProviderShape(p) {
       throw new Error(`provider name must not start with '${CLAUDEX_PROVIDER_PREFIX}'`);
     }
     throw new Error(
-      `invalid provider name: must match [a-z0-9][a-z0-9-]{0,63} and not be reserved`
+      `invalid provider name: must match [a-z0-9][a-z0-9_-]{0,63} and not be reserved`
     );
   }
   if (typeof p.base_url !== 'string' || p.base_url.length === 0) {

@@ -261,7 +261,7 @@ Resolve config drift: present diff between codexx state and current files; offer
 
 Restore ChatGPT OAuth tokens from the most recent backup.
 
-#### `codexx update [--from-local <path>] [--from-npm]`
+#### `codexx update [--from-local <path>]`
 
 Update codexx itself. Use `codexx -- update` to passthrough to `codex update`.
 

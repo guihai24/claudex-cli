@@ -87,6 +87,47 @@ export function findClaudexSections(raw) {
 }
 
 /**
+ * Locate a `[model_providers.claudex-<name>]` table that is NOT wrapped in
+ * BEGIN/END markers — an "orphan".
+ *
+ * Orphans appear because the Codex Desktop App re-serialises config.toml
+ * whenever it writes to it (project trust, plugins, mcp_servers, …), and TOML
+ * serialisers drop comments. The table survives; our markers do not. Without
+ * this lookup, applyClaudexProvider would take the `insert` path and append a
+ * second definition of the same table, which strict TOML rejects with
+ * "trying to redefine an already defined table or value".
+ *
+ * The `claudex-` prefix is reserved (isValidProviderName rejects names that
+ * start with it), so matching on the prefix cannot claim a user-authored table.
+ *
+ * Returns { providerName, startLine, endLine } or null.
+ */
+export function findOrphanClaudexSection(raw, providerName) {
+  const targetHeader = `model_providers.${toClaudexProviderId(providerName)}`;
+  const headers = findAllSectionHeaders(raw);
+  const target = headers.find((h) => h.header === targetHeader);
+  if (!target) return null;
+  // If it already sits inside a marker block, it is not an orphan.
+  const covered = findClaudexSections(raw).some(
+    (s) => target.headerLine > s.beginLine && target.headerLine < s.endLine
+  );
+  if (covered) return null;
+  const lines = splitLines(raw);
+  let startLine = target.headerLine;
+  if (startLine > 0) {
+    const above = lines[startLine - 1].trim();
+    if (above.startsWith('#') && above.includes('claudex-cli managed BEGIN')) {
+      startLine -= 1;
+    }
+  }
+  return {
+    providerName,
+    startLine,
+    endLine: findOrphanSectionEnd(lines, target.headerLine, headers)
+  };
+}
+
+/**
  * Build a marker-delimited section block (no trailing newline) for a provider.
  * @param {object} provider — codexx provider metadata
  * @param {object} [opts] — { ts?: Date | string }
@@ -126,7 +167,8 @@ export function buildClaudexBlock(provider, opts = {}) {
 /**
  * Insert or replace the claudex-managed section for a provider and set
  * top-level `model` and `model_provider` to point at it.
- * @returns { next: string, diff: { action: 'insert'|'update', providerName: string, topLevelChanges: object } }
+ * @returns { next: string, diff: { action: 'insert'|'update', providerName: string, topLevelChanges: object, adopted: boolean } }
+ *   `adopted` is true when an unmarked orphan table was re-claimed in place.
  */
 export function applyClaudexProvider(raw, provider, opts = {}) {
   parseConfigToml(raw); // guard
@@ -147,17 +189,19 @@ export function applyClaudexProvider(raw, provider, opts = {}) {
     (s) => s.providerName === provider.name
   );
   let action;
+  let adopted = false;
   if (existing) {
     next = replaceLineRange(next, existing.beginLine, existing.endLine, block);
     action = 'update';
   } else {
-    // Markers may have been stripped/corrupted by an external edit while the
-    // table itself survived — inserting blindly would redefine the table and
-    // fail TOML validation. Adopt the orphaned section instead.
-    const orphan = findOrphanClaudexSection(next, claudexId);
+    // No markers — but the table may still be there, stripped of its comments
+    // by an external rewrite. Replace it in place rather than appending a
+    // duplicate definition. See findOrphanClaudexSection.
+    const orphan = findOrphanClaudexSection(next, provider.name);
     if (orphan) {
-      next = replaceLineRange(next, orphan.fromLine, orphan.toLine, block);
+      next = replaceLineRange(next, orphan.startLine, orphan.endLine, block);
       action = 'update';
+      adopted = true;
     } else {
       next = insertAtAnchor(next, block);
       action = 'insert';
@@ -167,7 +211,7 @@ export function applyClaudexProvider(raw, provider, opts = {}) {
   parseConfigToml(next); // post-validate parses
   return {
     next,
-    diff: { action, providerName: provider.name, topLevelChanges }
+    diff: { action, providerName: provider.name, topLevelChanges, adopted }
   };
 }
 
@@ -180,10 +224,21 @@ export function removeClaudexProvider(raw, providerName) {
   parseConfigToml(raw);
   const sections = findClaudexSections(raw);
   const target = sections.find((s) => s.providerName === providerName);
-  if (!target) return { next: raw, diff: { action: 'noop', providerName } };
-  const next = deleteLineRange(raw, target.beginLine, target.endLine);
-  parseConfigToml(next);
-  return { next, diff: { action: 'remove', providerName } };
+  if (target) {
+    const next = deleteLineRange(raw, target.beginLine, target.endLine);
+    parseConfigToml(next);
+    return { next, diff: { action: 'remove', providerName, adopted: false } };
+  }
+  // Markers may have been stripped externally; the table itself can still be
+  // there. Leaving it behind would collide with a later re-add of the same
+  // provider, so remove the orphan too.
+  const orphan = findOrphanClaudexSection(raw, providerName);
+  if (orphan) {
+    const next = deleteLineRange(raw, orphan.startLine, orphan.endLine);
+    parseConfigToml(next);
+    return { next, diff: { action: 'remove', providerName, adopted: true } };
+  }
+  return { next: raw, diff: { action: 'noop', providerName, adopted: false } };
 }
 
 /**
@@ -295,49 +350,6 @@ function deleteLineRange(raw, fromLineIdx, toLineIdx) {
   return joinLines(lines, raw);
 }
 
-/**
- * Find a claudex-owned table whose BEGIN/END markers were lost or corrupted
- * by an external edit (comment-dropping TOML rewrites, manual edits, encoding
- * damage to the em-dash in the BEGIN line). Since parseConfigToml(raw) has
- * already succeeded, the header appears at most once, so replacing the whole
- * section is safe. Returns { fromLine, toLine } (inclusive) or null.
- */
-function findOrphanClaudexSection(raw, claudexId) {
-  const target = `model_providers.${claudexId}`;
-  const headers = findAllSectionHeaders(raw);
-  const hit = headers.find((h) => h.header === target);
-  if (!hit) return null;
-  const lines = splitLines(raw);
-  const nextHeader = headers.find((h) => h.headerLine > hit.headerLine);
-  const boundary = nextHeader ? nextHeader.headerLine : lines.length;
-  // Section body ends at its last key-value line; trailing blanks/comments may
-  // belong to the next section, so they are not consumed by default.
-  let toLine = hit.headerLine;
-  for (let i = hit.headerLine + 1; i < boundary; i++) {
-    const trimmed = lines[i].trim();
-    if (trimmed === '' || trimmed.startsWith('#')) continue;
-    toLine = i;
-  }
-  // Sweep a stray END marker directly after the body (blanks allowed); any
-  // other comment stops the sweep — it may document the next section.
-  for (let i = toLine + 1; i < boundary; i++) {
-    const trimmed = lines[i].trim();
-    if (trimmed === '') continue;
-    if (trimmed.startsWith('#') && trimmed.includes('claudex-cli managed END')) {
-      toLine = i;
-    }
-    break;
-  }
-  // Sweep a corrupted BEGIN marker immediately above the header.
-  let fromLine = hit.headerLine;
-  if (fromLine > 0) {
-    const above = lines[fromLine - 1].trim();
-    if (above.startsWith('#') && above.includes('claudex-cli managed BEGIN')) {
-      fromLine -= 1;
-    }
-  }
-  return { fromLine, toLine };
-}
 
 /**
  * Find the anchor for inserting a new claudex section.
@@ -379,6 +391,34 @@ function findSectionEndLine(lines, headerLine, allHeaders) {
   // end is the line just before next section header, excluding trailing blank lines
   let end = next.headerLine - 1;
   while (end > headerLine && lines[end].trim() === '') end--;
+  return end;
+}
+
+/**
+ * Last key/value line belonging to the section that starts at `headerLine`.
+ * Unlike findSectionEndLine this also skips trailing comment lines, so an
+ * orphan section immediately followed by another block's BEGIN marker does not
+ * swallow that marker when replaced.
+ */
+function findOrphanSectionEnd(lines, headerLine, allHeaders) {
+  const next = allHeaders.find((h) => h.headerLine > headerLine);
+  const limit = next ? next.headerLine - 1 : lines.length - 1;
+  let end = headerLine;
+  for (let i = headerLine + 1; i <= limit; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed === '' || trimmed.startsWith('#')) continue;
+    end = i;
+  }
+  // Sweep a stray END marker directly after the body (blanks allowed); any
+  // other comment stops the sweep — it may document the next section.
+  for (let i = end + 1; i <= limit; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed === '') continue;
+    if (trimmed.startsWith('#') && trimmed.includes('claudex-cli managed END')) {
+      end = i;
+    }
+    break;
+  }
   return end;
 }
 

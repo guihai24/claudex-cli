@@ -62,6 +62,7 @@ export async function writeLastKnownHashes(hashes, opts = {}) {
     schema_version: 1,
     config_toml_hash: hashes.config_toml_hash || null,
     auth_json_hash: hashes.auth_json_hash || null,
+    env_file_hash: hashes.env_file_hash || null,
     agents_md_hash: hashes.agents_md_hash || null,
     recorded_at: hashes.recorded_at || new Date().toISOString()
   };

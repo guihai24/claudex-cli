@@ -123,7 +123,7 @@ const TXT = {
   zh: {
     menuTitle: 'Claudex 主菜单',
     bannerSub: 'Provider Switching Console',
-    bannerBy: 'Powered by github.com/huaguihai',
+    bannerBy: 'Powered by github.com/guihai24',
     m1: '1. 开始配置 / 添加服务商',
     m2: '2. 查看当前配置',
     m3: '3. 切换模型服务商',
@@ -273,7 +273,7 @@ const TXT = {
   en: {
     menuTitle: 'Claudex Main Menu',
     bannerSub: 'Provider Switching Console',
-    bannerBy: 'Powered by github.com/huaguihai',
+    bannerBy: 'Powered by github.com/guihai24',
     m1: '1. Initial setup / add provider',
     m2: '2. View current configuration',
     m3: '3. Switch model provider',
@@ -466,7 +466,7 @@ Usage:
   claudex lang <zh|en|中文|英文>
   claudex status
   claudex native <on|off|status|profile|doctor>
-  claudex update [--from-local <path>] [--from-npm]
+  claudex update [--from-local <path>]
   claudex run [claude args...]
   claudex stats [--week|--month|--year|--since DATE] [--json]
   claudex provider add [--name N --base-url URL --api-key KEY --haiku-model H --sonnet-model S --opus-model O]
@@ -1509,16 +1509,26 @@ async function runClaude(extraArgs) {
 
 async function cmdUpdate(rest) {
   const { flags } = parseFlags(rest);
-  const repoUrl = 'git+https://github.com/huaguihai/claudex-cli.git#main';
+  const repoUrl = 'git+https://github.com/guihai24/claudex-cli.git#main';
   const fromLocal = typeof flags['from-local'] === 'string' ? flags['from-local'] : '';
-  const fromNpm = Boolean(flags['from-npm']);
+
+  // `claudex-cli` on the npm registry is an unrelated project that happens to
+  // share the name (a .claude scaffolder, single `claudex` bin, no `codexx`).
+  // Installing it would silently replace this tool. Refuse rather than
+  // remove the flag, so anyone with the old README still gets a clear answer.
+  if (flags['from-npm']) {
+    console.error(
+      'claudex update --from-npm is not supported: the "claudex-cli" package on the npm registry\n' +
+      'is a different project. This tool is only distributed from GitHub.\n' +
+      `Run \`claudex update\` (pulls ${repoUrl}) or \`claudex update --from-local <path>\`.`
+    );
+    process.exitCode = 1;
+    return;
+  }
 
   if (fromLocal) {
     console.log(`Updating from local path: ${fromLocal}`);
     await runProcess('npm', ['i', '-g', fromLocal], process.env);
-  } else if (fromNpm) {
-    console.log('Updating from npm registry: claudex-cli@latest');
-    await runProcess('npm', ['i', '-g', 'claudex-cli@latest'], process.env);
   } else {
     console.log(`Updating from GitHub: ${repoUrl}`);
     await runProcess('npm', ['i', '-g', repoUrl], process.env);

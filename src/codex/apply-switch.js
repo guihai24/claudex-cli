@@ -91,6 +91,11 @@ export async function applyProviderSwitch(provider, opts = {}) {
         if (lastKnown.auth_json_hash && lastKnown.auth_json_hash !== authHashBefore) {
           driftedFiles.push('auth.json');
         }
+        // Baselines written before env_file_hash was recorded have it as
+        // null/undefined; treat those as "no baseline" rather than drift.
+        if (lastKnown.env_file_hash && lastKnown.env_file_hash !== envHashBefore) {
+          driftedFiles.push('.env');
+        }
         if (driftedFiles.length > 0) {
           drift = { driftedFiles, lastKnown };
           if (opts.onDrift) {

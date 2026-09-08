@@ -304,6 +304,83 @@ test('applyClaudexProvider: switching active provider does not delete other clau
   assert.ok(parsed.model_providers['claudex-bar'], 'bar section present');
 });
 
+// ===== applyClaudexProvider: adopt orphaned claudex table =====
+
+test('applyClaudexProvider: adopts orphaned claudex table when markers were stripped by external edit', () => {
+  // External TOML rewrites (parse → serialize) drop comments, leaving our
+  // table without BEGIN/END markers. Re-applying must not insert a duplicate.
+  const raw = `model = "gpt-5"
+model_provider = "claudex-openrouter"
+
+[model_providers.claudex-openrouter]
+name = "openrouter"
+base_url = "https://old.example.com/v1"
+wire_api = "chat"
+requires_openai_auth = true
+env_key = "OPENAI_API_KEY"
+
+[projects."/repo"]
+trust_level = "trusted"
+`;
+  const { next, diff } = applyClaudexProvider(raw, SAMPLE_PROVIDER, buildOpts);
+  assert.equal(diff.action, 'update');
+  const parsed = parseConfigToml(next);
+  assert.equal(parsed.model_providers['claudex-openrouter'].base_url, 'https://openrouter.ai/api/v1');
+  assert.equal(parsed.projects['/repo'].trust_level, 'trusted');
+  // Adopted section is marker-wrapped again
+  const sections = findClaudexSections(next);
+  assert.equal(sections.length, 1);
+  assert.equal(sections[0].providerName, 'openrouter');
+});
+
+test('applyClaudexProvider: adopts table with corrupted BEGIN marker and sweeps stray END', () => {
+  const raw = `model = "gpt-5"
+model_provider = "claudex-openrouter"
+
+# claudex-cli managed BEGIN â€" provider=openrouter schema=v1 ts=2026-01-01T00:00:00.000Z
+[model_providers.claudex-openrouter]
+name = "openrouter"
+base_url = "https://old.example.com/v1"
+# claudex-cli managed END
+`;
+  const { next, diff } = applyClaudexProvider(raw, SAMPLE_PROVIDER, buildOpts);
+  assert.equal(diff.action, 'update');
+  parseConfigToml(next);
+  const sections = findClaudexSections(next);
+  assert.equal(sections.length, 1);
+  // Corrupted BEGIN line swept along with the adopted section
+  assert.ok(!next.includes('â€'));
+  // Exactly one marker pair remains
+  assert.equal((next.match(/claudex-cli managed END/g) || []).length, 1);
+});
+
+test('applyClaudexProvider: adopting orphan does not consume comments belonging to the next section', () => {
+  const raw = `[model_providers.claudex-openrouter]
+name = "openrouter"
+base_url = "https://old.example.com/v1"
+
+# trusted projects
+[projects."/repo"]
+trust_level = "trusted"
+`;
+  const { next } = applyClaudexProvider(raw, SAMPLE_PROVIDER, buildOpts);
+  assert.ok(next.includes('# trusted projects'));
+  const parsed = parseConfigToml(next);
+  assert.equal(parsed.projects['/repo'].trust_level, 'trusted');
+});
+
+test('applyClaudexProvider: does not adopt orphaned tables of other providers', () => {
+  const raw = `[model_providers.claudex-foo]
+name = "foo"
+base_url = "https://api.foo.com/v1"
+`;
+  const { next, diff } = applyClaudexProvider(raw, SAMPLE_PROVIDER, buildOpts);
+  assert.equal(diff.action, 'insert');
+  const parsed = parseConfigToml(next);
+  assert.ok(parsed.model_providers['claudex-foo'], 'unrelated orphan left untouched');
+  assert.ok(parsed.model_providers['claudex-openrouter']);
+});
+
 // ===== setTopLevelKey =====
 
 test('setTopLevelKey: updates existing key in place preserving comment', () => {

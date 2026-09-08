@@ -30,7 +30,7 @@ one-liner: Switch Claude Code and OpenAI Codex providers without touching env va
 language: Node.js
 min_runtime: node >= 18.0.0
 package_manager: npm
-install: npm i -g git+https://github.com/guihai24/claudex-cli.git#main
+install: npm i -g 'git+https://github.com/guihai24/claudex-cli.git#main'
 verify: claudex --help
 config_file: ~/.claude/settings.<name>.json; ~/.config/claudex-cli/current-provider; ~/.codex/config.toml (codexx, planned)
 entry: bin/claudex.js (claudex); bin/codexx.js (codexx, planned)
@@ -44,8 +44,9 @@ binaries: claudex (Claude Code), codexx (OpenAI Codex, planned — see docs/code
 node -v
 # require: >= 18
 
-# 2) Install
-npm i -g git+https://github.com/guihai24/claudex-cli.git#main
+# 2) Install (quote URL in zsh to avoid glob error, or use shorthand)
+npm i -g 'git+https://github.com/guihai24/claudex-cli.git#main'
+# Or shorthand: npm i -g guihai24/claudex-cli
 
 # 3) Initialize shell helpers and bootstrap global Claude settings
 claudex init
@@ -180,8 +181,17 @@ Power users never want a menu between them and their shell. New users need guide
 ### Global install
 
 ```bash
-npm i -g git+https://github.com/guihai24/claudex-cli.git#main
+# Recommended: quote the URL to prevent zsh pattern matching errors
+npm i -g 'git+https://github.com/guihai24/claudex-cli.git#main'
+
+# Or using GitHub shorthand:
+npm i -g guihai24/claudex-cli
 ```
+
+> [!NOTE]
+> **zsh users (macOS default)**: Always quote URLs containing `#` (e.g. `'git+https://...#main'`) or use the shorthand `guihai24/claudex-cli`, otherwise zsh will throw `zsh: no matches found`.
+>
+> **Do NOT** run `npm i -g claudex-cli` — the package on npm registry is an unrelated project.
 
 ### Local run from source
 
@@ -422,7 +432,7 @@ Every time a provider file is overwritten, the previous version is saved to `~/.
 → Node resolves a bare `claude` to `claude.exe` only, so it skips npm's `claude.cmd`/`claude.ps1` shims and can hit an older WinGet-installed `claude.exe`. `claudex` now mirrors your shell's `PATH`/`PATHEXT` lookup and launches the same `claude` you get interactively (running the npm install's `cli.js` with your `node`). Keep your npm global bin (e.g. `%APPDATA%\npm`) ahead of the WinGet path in `PATH`.
 
 **Windows: `claudex update` fails with `spawn npm ENOENT`**
-→ Same root cause: Node can't resolve npm's `npm.cmd`/`npm.ps1` shims (there is no `npm.exe`). `claudex update` now runs npm — and the post-update `claudex init` — via their `cli.js` with your `node`, so no shell is needed. If you're on a build from before this fix, update once manually: `npm i -g git+https://github.com/guihai24/claudex-cli.git#main`.
+→ Same root cause: Node can't resolve npm's `npm.cmd`/`npm.ps1` shims (there is no `npm.exe`). `claudex update` now runs npm — and the post-update `claudex init` — via their `cli.js` with your `node`, so no shell is needed. If you're on a build from before this fix, update once manually: `npm i -g 'git+https://github.com/guihai24/claudex-cli.git#main'`.
 
 ---
 
@@ -436,7 +446,7 @@ For the full implementation contract see [`docs/codexx-spec.md`](./docs/codexx-s
 
 ```bash
 # 1) Same install as claudex
-npm i -g git+https://github.com/guihai24/claudex-cli.git#main
+npm i -g 'git+https://github.com/guihai24/claudex-cli.git#main'
 
 # 2) Initialise state dir + check codex install
 codexx init

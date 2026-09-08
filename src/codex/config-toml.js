@@ -112,10 +112,18 @@ export function findOrphanClaudexSection(raw, providerName) {
     (s) => target.headerLine > s.beginLine && target.headerLine < s.endLine
   );
   if (covered) return null;
+  const lines = splitLines(raw);
+  let startLine = target.headerLine;
+  if (startLine > 0) {
+    const above = lines[startLine - 1].trim();
+    if (above.startsWith('#') && above.includes('claudex-cli managed BEGIN')) {
+      startLine -= 1;
+    }
+  }
   return {
     providerName,
-    startLine: target.headerLine,
-    endLine: findOrphanSectionEnd(splitLines(raw), target.headerLine, headers)
+    startLine,
+    endLine: findOrphanSectionEnd(lines, target.headerLine, headers)
   };
 }
 
@@ -342,49 +350,6 @@ function deleteLineRange(raw, fromLineIdx, toLineIdx) {
   return joinLines(lines, raw);
 }
 
-/**
- * Find a claudex-owned table whose BEGIN/END markers were lost or corrupted
- * by an external edit (comment-dropping TOML rewrites, manual edits, encoding
- * damage to the em-dash in the BEGIN line). Since parseConfigToml(raw) has
- * already succeeded, the header appears at most once, so replacing the whole
- * section is safe. Returns { fromLine, toLine } (inclusive) or null.
- */
-function findOrphanClaudexSection(raw, claudexId) {
-  const target = `model_providers.${claudexId}`;
-  const headers = findAllSectionHeaders(raw);
-  const hit = headers.find((h) => h.header === target);
-  if (!hit) return null;
-  const lines = splitLines(raw);
-  const nextHeader = headers.find((h) => h.headerLine > hit.headerLine);
-  const boundary = nextHeader ? nextHeader.headerLine : lines.length;
-  // Section body ends at its last key-value line; trailing blanks/comments may
-  // belong to the next section, so they are not consumed by default.
-  let toLine = hit.headerLine;
-  for (let i = hit.headerLine + 1; i < boundary; i++) {
-    const trimmed = lines[i].trim();
-    if (trimmed === '' || trimmed.startsWith('#')) continue;
-    toLine = i;
-  }
-  // Sweep a stray END marker directly after the body (blanks allowed); any
-  // other comment stops the sweep — it may document the next section.
-  for (let i = toLine + 1; i < boundary; i++) {
-    const trimmed = lines[i].trim();
-    if (trimmed === '') continue;
-    if (trimmed.startsWith('#') && trimmed.includes('claudex-cli managed END')) {
-      toLine = i;
-    }
-    break;
-  }
-  // Sweep a corrupted BEGIN marker immediately above the header.
-  let fromLine = hit.headerLine;
-  if (fromLine > 0) {
-    const above = lines[fromLine - 1].trim();
-    if (above.startsWith('#') && above.includes('claudex-cli managed BEGIN')) {
-      fromLine -= 1;
-    }
-  }
-  return { fromLine, toLine };
-}
 
 /**
  * Find the anchor for inserting a new claudex section.
@@ -443,6 +408,16 @@ function findOrphanSectionEnd(lines, headerLine, allHeaders) {
     const trimmed = lines[i].trim();
     if (trimmed === '' || trimmed.startsWith('#')) continue;
     end = i;
+  }
+  // Sweep a stray END marker directly after the body (blanks allowed); any
+  // other comment stops the sweep — it may document the next section.
+  for (let i = end + 1; i <= limit; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed === '') continue;
+    if (trimmed.startsWith('#') && trimmed.includes('claudex-cli managed END')) {
+      end = i;
+    }
+    break;
   }
   return end;
 }

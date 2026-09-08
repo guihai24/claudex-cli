@@ -30,7 +30,7 @@ one-liner: 一条命令切换 Claude Code 与 OpenAI Codex 的服务商，不用
 language: Node.js
 min_runtime: node >= 18.0.0
 package_manager: npm
-install: npm i -g git+https://github.com/guihai24/claudex-cli.git#main
+install: npm i -g 'git+https://github.com/guihai24/claudex-cli.git#main'
 verify: claudex --help
 config_file: ~/.claude/settings.<name>.json; ~/.config/claudex-cli/current-provider; ~/.codex/config.toml (codexx, 规划中)
 entry: bin/claudex.js (claudex); bin/codexx.js (codexx, 规划中)
@@ -44,8 +44,9 @@ binaries: claudex (Claude Code), codexx (OpenAI Codex, 规划中 — 详见 docs
 node -v
 # 要求: >= 18
 
-# 2) 安装
-npm i -g git+https://github.com/guihai24/claudex-cli.git#main
+# 2) 安装（zsh 终端建议加单引号避免模式匹配报错，或使用简写）
+npm i -g 'git+https://github.com/guihai24/claudex-cli.git#main'
+# 或使用 GitHub 简写：npm i -g guihai24/claudex-cli
 
 # 3) 初始化（写入 shell helper + 创建全局 Claude 配置）
 claudex init
@@ -189,8 +190,17 @@ graph LR
 ### 全局安装
 
 ```bash
-npm i -g git+https://github.com/guihai24/claudex-cli.git#main
+# 推荐方式：加单引号避免 zsh 通配符解析报错
+npm i -g 'git+https://github.com/guihai24/claudex-cli.git#main'
+
+# 或使用 GitHub 简写语法：
+npm i -g guihai24/claudex-cli
 ```
+
+> [!NOTE]
+> **zsh 用户（macOS 默认终端）注意**：带 `#` 的 URL 必须用引号括起来（如 `'git+https://...#main'`）或直接使用简写 `guihai24/claudex-cli`，否则会触发 `zsh: no matches found` 错误。
+>
+> **切勿直接执行** `npm i -g claudex-cli` —— npm 官方 Registry 上的同名包是另一个无关项目。
 
 ### 源码运行
 
@@ -436,7 +446,7 @@ claudex stats [--week|--month|--year|--since DATE] [--json] [--idle-gap 5m]   # 
 → Node 解析裸 `claude` 时只会补 `.exe`，因此会跳过 npm 的 `claude.cmd`/`claude.ps1`，命中 WinGet 装的旧 `claude.exe`。`claudex` 现在会复刻 shell 的 `PATH`/`PATHEXT` 查找，启动与你交互式敲 `claude` **完全一致**的那一份（用你的 `node` 直接跑 npm 安装包里的 `cli.js`）。请保证 npm 全局 bin（如 `%APPDATA%\npm`）在 `PATH` 中排在 WinGet 路径前面。
 
 **Windows：`claudex update` 报 `spawn npm ENOENT`**
-→ 同一类根因：Node 无法解析 npm 的 `npm.cmd`/`npm.ps1`（没有 `npm.exe`）。`claudex update` 现在会用你的 `node` 直接跑 npm（以及更新后的 `claudex init`）的 `cli.js`，无需 shell 即可工作。若你用的是修复前的版本，先手动更新一次：`npm i -g git+https://github.com/guihai24/claudex-cli.git#main`。
+→ 同一类根因：Node 无法解析 npm 的 `npm.cmd`/`npm.ps1`（没有 `npm.exe`）。`claudex update` 现在会用你的 `node` 直接跑 npm（以及更新后的 `claudex init`）的 `cli.js`，无需 shell 即可工作。若你用的是修复前的版本，先手动更新一次：`npm i -g 'git+https://github.com/guihai24/claudex-cli.git#main'`。
 
 ---
 
@@ -450,7 +460,7 @@ claudex stats [--week|--month|--year|--since DATE] [--json] [--idle-gap 5m]   # 
 
 ```bash
 # 1) 和 claudex 同一个安装
-npm i -g git+https://github.com/guihai24/claudex-cli.git#main
+npm i -g 'git+https://github.com/guihai24/claudex-cli.git#main'
 
 # 2) 初始化 state 目录 + 检测 codex
 codexx init

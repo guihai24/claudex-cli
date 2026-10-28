@@ -17,6 +17,7 @@ import {
   preflight
 } from './launch.js';
 import { ENV_MARKER_BEGIN, ENV_MARKER_END } from './env-file.js';
+import { inspectReviewCatalog } from './review-catalog.js';
 
 /**
  * One diagnostic check result.
@@ -47,6 +48,7 @@ export async function runDoctor(opts = {}) {
   checks.push(await checkCredentialsStoreMode());
   checks.push(await checkEnvFile());
   checks.push(await checkProviderInventory());
+  checks.push(await checkReviewCatalog());
 
   return checks;
 }
@@ -104,8 +106,9 @@ async function checkCodexAppRunning() {
     return { name: 'codex_app_running', status: 'info', message: 'Desktop App detection not supported on this platform' };
   }
   if (app.running) {
-    // On codex >= v0.130 the app-server supports live config reload, so
-    // switching providers no longer requires an App restart.
+    // Provider config hot-reloads, but Codex loads model_catalog_json only at
+    // app-server startup. A switch that changes auto-review metadata still
+    // needs a restart.
     const c = detectCodex();
     const parts = (c.version || '0.0.0').split('.').map((n) => parseInt(n, 10));
     const minor = parts[1] || 0;
@@ -113,7 +116,7 @@ async function checkCodexAppRunning() {
       return {
         name: 'codex_app_running',
         status: 'pass',
-        message: `Codex Desktop App is running (PID ${app.pid}); ${c.version} supports config hot-reload — no restart needed`
+        message: `Codex Desktop App is running (PID ${app.pid}); provider config hot-reloads, but auto-review catalog changes need a restart`
       };
     }
     return {
@@ -393,6 +396,70 @@ async function checkProviderInventory() {
     name: 'provider_inventory',
     status: 'pass',
     message: `${names.length} codexx provider(s) configured: ${names.join(', ')}`
+  };
+}
+
+async function checkReviewCatalog() {
+  const active = await getCurrentProvider();
+  if (!active) {
+    return {
+      name: 'review_catalog',
+      status: 'info',
+      message: 'No active codexx provider; auto-review catalog check skipped'
+    };
+  }
+  let provider;
+  try {
+    provider = await readProvider(active);
+  } catch {
+    return {
+      name: 'review_catalog',
+      status: 'info',
+      message: 'Active provider metadata missing; auto-review catalog check skipped'
+    };
+  }
+
+  const configPath = codexConfigTomlPath();
+  if (!(await exists(configPath))) {
+    return {
+      name: 'review_catalog',
+      status: 'warn',
+      message: 'config.toml missing; cannot resolve auto-review catalog'
+    };
+  }
+
+  let result;
+  try {
+    const configText = await fsp.readFile(configPath, 'utf8');
+    result = await inspectReviewCatalog(configText, provider, { configTomlPath: configPath });
+  } catch (err) {
+    return {
+      name: 'review_catalog',
+      status: 'fail',
+      message: `Auto-review catalog check failed: ${err.message}`
+    };
+  }
+
+  if (result.status === 'not-configured') {
+    return {
+      name: 'review_catalog',
+      status: 'info',
+      message: 'model_catalog_json is not configured; auto-review catalog sync skipped'
+    };
+  }
+  if (result.status === 'synced') {
+    return {
+      name: 'review_catalog',
+      status: 'pass',
+      message: `Auto-review model ${result.reviewModel} matches catalog override`,
+      meta: { path: result.catalogPath, review_model: result.reviewModel }
+    };
+  }
+  return {
+    name: 'review_catalog',
+    status: result.status === 'invalid' ? 'fail' : 'warn',
+    message: `Auto-review catalog needs sync for ${result.reviewModel} (${result.status})`,
+    fix: 'Run codexx use <active-provider>, or codexx sync-review <model>'
   };
 }
 

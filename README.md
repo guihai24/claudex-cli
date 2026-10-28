@@ -457,6 +457,7 @@ codexx add
 # > Base URL: https://openrouter.ai/api/v1
 # > API Key: sk-or-v1-...
 # > Model: anthropic/claude-sonnet-4.5
+# > Auto-review model (Enter = follow main model):
 # > Wire API (chat/responses) [chat]: chat
 
 # Or non-interactive:
@@ -464,6 +465,7 @@ codexx add --name openrouter \
   --base-url https://openrouter.ai/api/v1 \
   --api-key sk-or-v1-... \
   --model anthropic/claude-sonnet-4.5 \
+  --review-model main \
   --wire-api chat
 
 # 4) Switch to it
@@ -471,7 +473,10 @@ codexx use openrouter
 # ✅ Switched to provider: openrouter
 #    Endpoint: https://openrouter.ai/api/v1
 #    Model: anthropic/claude-sonnet-4.5
+#    Auto-review model: anthropic/claude-sonnet-4.5 (follows main model)
+#    Review catalog: synced
 #    Backup: ~/.config/claudex-cli/codex-backups/2026-05-17T.../
+# ℹ️ Fully restart Codex after switching because the review catalog loads at startup.
 
 # 5) Run codex as usual
 codexx
@@ -493,6 +498,7 @@ codexx revert
 | `codexx add / list / edit / remove` | Provider CRUD with validation; `edit` patches fields in place (Enter-to-keep wizard, or `--model X` flag for single-field changes) |
 | `codexx test [name]` | HTTP probe respecting `wire_api` (chat / responses) |
 | `codexx status` | Active provider + Codex version + Desktop App state + drift |
+| `codexx sync-review [model]` | Re-sync the Codex auto-review catalog after changing models through the Desktop picker |
 | `codexx doctor [--json]` | Health report (CLI version, drift, env conflicts, project-local config, credentials store, …) |
 | `codexx menu` | Interactive menu — same UX shape as `claudex menu` |
 | `codexx snapshot / restore / revert` | First-run snapshot + per-switch backups + atomic restore |
@@ -510,11 +516,12 @@ graph LR
     B --> C[Read before-state + hashes]
     C --> D[Drift check vs last-known]
     D --> E[Build target: TOML surgery + auth payload]
-    E --> F[Backup config.toml + auth.json]
-    F --> G[Write auth.json atomically]
-    G --> H[Write config.toml atomically]
-    H --> I[Post-verify non-claudex untouched]
-    I --> J[Update last-known hashes + audit log]
+    E --> F[Backup config.toml + auth.json + review catalog]
+    F --> G[Sync auto-review model in catalog]
+    G --> H[Write auth.json atomically]
+    H --> I[Write config.toml atomically]
+    I --> J[Post-verify non-claudex untouched]
+    J --> K[Update last-known hashes + audit log]
 ```
 
 Key design choices:
@@ -522,6 +529,7 @@ Key design choices:
 - **String-level surgical TOML edit, not round-trip.** No Node TOML library preserves comments/format on re-serialise. `codexx` finds its own marker-delimited sections and rewrites only those, leaving every other byte (your comments, MCP servers, project trusts, plugins, marketplaces) bit-identical.
 - **`requires_openai_auth = true` + `env_key = "OPENAI_API_KEY"`** in every managed section, so Codex's AuthManager picks up the API key from `auth.json` regardless of how the binary is launched (CLI from terminal, Desktop App from Dock, VS Code extension).
 - **Double-file atomic write with rollback.** Writes `auth.json` first; if `config.toml` write fails, the auth write is rolled back.
+- **Auto-review catalog sync.** Providers may set `auto_review_model`; when omitted, Codex review follows the main model. `codexx use` points the main model catalog entry at the review model, creates a hidden review entry when needed, and backs up the catalog. Codex must be fully restarted because `model_catalog_json` loads only during app-server startup.
 - **First-use snapshot + per-switch backups.** `codexx revert` always knows how to restore the pre-codexx state byte-for-byte.
 
 ### Commands
@@ -539,6 +547,7 @@ codexx use <name|index>             # switch active provider
 codexx remove <name|index> [--yes]
 codexx test [name|index]            # connectivity probe
 codexx status                       # active provider + Codex/App state
+codexx sync-review [model]          # sync auto-review catalog after a Desktop model change
 codexx doctor [--json] [--provider <name>]
 codexx snapshot                     # ensure pre-codexx snapshot
 codexx restore <id|latest>          # restore a previous backup
@@ -557,10 +566,11 @@ codexx login / logout / app         # claudex-aware codex wrappers
 |---|---|---|
 | `~/.codex/config.toml` | shared with codex | codexx writes only `[model_providers.claudex-<name>]` sections + top-level `model` / `model_provider`, marker-delimited |
 | `~/.codex/auth.json` | shared with codex | codexx writes the active provider's API key (apikey mode); ChatGPT OAuth tokens are backed up before being overwritten |
+| catalog referenced by `model_catalog_json` | shared with codex | codexx points the main model entry's `auto_review_model_override` at the review model; the catalog path and bytes are included in backups when configured |
 | `~/.config/claudex-cli/codex-providers/<name>.json` | codexx | provider metadata (api_key, base_url, model, …); chmod 600 |
 | `~/.config/claudex-cli/codex-current-provider` | codexx | single line = active provider name |
 | `~/.config/claudex-cli/codex-snapshot/pre-claudex/` | codexx | byte-identical copy of `~/.codex/` from first `codexx use` |
-| `~/.config/claudex-cli/codex-backups/<ts>/` | codexx | per-switch backups (config.toml + auth.json + reason + hashes) |
+| `~/.config/claudex-cli/codex-backups/<ts>/` | codexx | per-switch backups (config.toml + auth.json + .env + review catalog when configured + reason + hashes) |
 | `~/.config/claudex-cli/codex-audit.log` | codexx | JSONL audit trail (use / revert / drift / chatgpt-backup events) |
 | `~/.config/claudex-cli/codex-last-known-hashes.json` | codexx | drift detection baseline |
 
@@ -573,6 +583,7 @@ Provider metadata schema:
   "base_url": "https://openrouter.ai/api/v1",
   "api_key": "sk-or-v1-...",
   "model": "anthropic/claude-sonnet-4.5",
+  "auto_review_model": "anthropic/claude-sonnet-4.5",
   "wire_api": "chat",
   "model_reasoning_effort": "medium",
   "http_headers": { "X-Title": "claudex" }
@@ -583,7 +594,7 @@ Provider metadata schema:
 
 | Component | Status |
 |---|---|
-| codex CLI | works on all versions; **upgrade to v0.130+** for config hot-reload (otherwise restart codex after switching) |
+| codex CLI | works on all versions; provider config hot-reloads on v0.130+, but auto-review catalog changes still require a full restart |
 | Codex Desktop App | reads `config.toml` + `auth.json` like the CLI; UI model picker may show "Custom" for non-OpenAI providers (upstream cosmetic issue [#19694](https://github.com/openai/codex/issues/19694), routing works correctly) |
 | Codex VS Code extension | reads the same files; some new-conversation model defaults are upstream bugs ([#4558](https://github.com/openai/codex/issues/4558)) |
 | ChatGPT subscription | coexists — `codexx` backs up your OAuth tokens before overwriting; `codexx restore-chatgpt` brings them back |
@@ -601,6 +612,9 @@ Provider metadata schema:
 
 **Desktop App still using the old provider after `codexx use`**
 → Codex < v0.130 doesn't hot-reload config. Restart the Desktop App (Cmd+Q then re-launch). On v0.130+, the App picks up changes automatically.
+
+**Auto approval uses the old model or fails after switching**
+→ Fully restart Codex so `model_catalog_json` reloads, then run `codexx status`. If you changed models directly in the Desktop model picker, run `codexx sync-review <model-slug>` before restarting.
 
 **`codexx test` returns 401**
 → Either the API key is wrong, or your shell has `OPENAI_API_KEY` set to a different value (terminal codex would use the shell env over `auth.json`). `codexx doctor` flags this as `shell_env_conflict`.

@@ -146,6 +146,23 @@ test('takeBackup: copies only files that exist', async () => {
   });
 });
 
+test('takeBackup: copies the configured review catalog and records its path', async () => {
+  const codexHome = await mktemp('codex-home-');
+  const claudexDir = await mktemp('claudex-dir-');
+  const catalogPath = path.join(codexHome, 'model-catalog-auto-review.json');
+  await fakeCodexHome(codexHome, {
+    'config.toml': `model_catalog_json = ${JSON.stringify(catalogPath)}\n`,
+    'model-catalog-auto-review.json': '{"models":[{"slug":"x"}]}\n'
+  });
+  await withEnv({ CODEX_HOME: codexHome, CLAUDEX_CONFIG_DIR: claudexDir }, async () => {
+    const dir = await takeBackup('with-review-catalog');
+    assert.ok(await fileExists(path.join(dir, 'review-catalog.json')));
+    const manifest = JSON.parse(await fsp.readFile(path.join(dir, 'hashes.json'), 'utf8'));
+    assert.ok(manifest.hashes.review_catalog);
+    assert.equal(manifest.paths.review_catalog, catalogPath);
+  });
+});
+
 // ===== listBackups =====
 
 test('listBackups: newest first', async () => {

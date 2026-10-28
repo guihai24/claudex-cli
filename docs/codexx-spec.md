@@ -130,7 +130,7 @@ Choose: [r] restore codexx state | [a] accept external change | [b] back to menu
 CLAUDEX_OWNED:
 
 ```
-init, menu, add, list, use, remove, test, status, doctor,
+init, menu, add, list, use, remove, test, status, sync-review, doctor,
 lang, update, snapshot, restore, revert, audit,
 reconcile, restore-chatgpt
 ```
@@ -151,11 +151,11 @@ Conflicts with codex subcommands: only `update`. Resolution: `codexx update` is 
 
 #### `codexx add [flags]`
 
-- Synopsis: `codexx add [--name N] [--base-url U] [--api-key K] [--model M] [--wire-api chat|responses] [--reasoning-effort low|medium|high]`
+- Synopsis: `codexx add [--name N] [--base-url U] [--api-key K] [--model M] [--review-model X|main] [--wire-api chat|responses] [--reasoning-effort low|medium|high]`
 - Behavior:
   1. Prompt for missing fields if interactive.
   2. Validate: `name` not in RESERVED, `base_url` is URL, `api_key` non-empty.
-  3. Write to `~/.config/claudex-cli/codex-providers/<name>.json` (chmod 600).
+  3. Write to `~/.config/claudex-cli/codex-providers/<name>.json` (chmod 600). If `--review-model` is omitted or `main`, leave `auto_review_model` unset so it follows the main model.
   4. Do NOT modify `~/.codex/` at this point.
 - Exit: 0 / 2 (validation error).
 
@@ -165,7 +165,7 @@ Print all known codexx providers, marking the active one.
 
 #### `codexx edit <name|index> [flags]`
 
-- Synopsis: `codexx edit <name> [--base-url U] [--api-key K] [--model M] [--wire-api chat|responses] [--reasoning-effort low|medium|high]`
+- Synopsis: `codexx edit <name> [--base-url U] [--api-key K] [--model M] [--review-model X|main] [--wire-api chat|responses] [--reasoning-effort low|medium|high]`
 - Behavior:
   1. Resolve name (or index from `list`).
   2. Read existing provider metadata.
@@ -186,7 +186,7 @@ Print all known codexx providers, marking the active one.
   3. `detectDrift()`; if drifted, prompt user (skip with `--force`).
   4. Detect ChatGPT OAuth in auth.json; back up if present (prompt unless `--yes`).
   5. Acquire file lock.
-  6. Write `config.toml` (surgical) + `auth.json` + `~/.codex/.env` (atomic triple-write with rollback chain).
+  6. Sync the configured `model_catalog_json` review model, then write `config.toml` (surgical) + `auth.json` + `~/.codex/.env` (rollback chain includes the catalog).
   7. Verify post-write; release lock.
   8. Print active state banner.
 - Exit: 0 / 1 (drift refused) / 2 (validation) / 3 (filesystem error).
@@ -212,11 +212,20 @@ Current Codex provider: openrouter
 Endpoint: https://openrouter.ai/api/v1
 Model: anthropic/claude-sonnet-4.5
 Wire API: chat
+Auto-review model: anthropic/claude-sonnet-4.5 (follows main model)
+Review catalog: synced
 Codex CLI: 0.130.2
 Codex Desktop: running (PID 12345)
 Auth mode: apikey (claudex managed)
 Config drift: none
 ```
+
+#### `codexx sync-review [model]`
+
+- Update the configured review catalog after a model is selected directly in the Codex Desktop picker.
+- Without `model`, use `auto_review_model` when set, otherwise the provider's main model.
+- Back up the catalog, point the main model's `auto_review_model_override` at the review model, create a hidden review entry when needed, refresh the drift baseline, and audit the action.
+- Codex must be fully restarted because `model_catalog_json` is loaded at app-server startup.
 
 #### `codexx doctor [--provider <name>]`
 
@@ -303,6 +312,7 @@ interface CodexProvider {
   base_url: string;                        // full URL, must start with http:// or https://
   api_key: string;                         // plaintext, chmod 600 enforced
   model: string;
+  auto_review_model?: string | null;       // omitted/null = follow model
   wire_api: "chat" | "responses";          // default "chat"
   model_reasoning_effort?: "low" | "medium" | "high";
   http_headers?: Record<string, string>;   // static only; no env_http_headers
@@ -338,8 +348,11 @@ Invariants:
 ```typescript
 {
   config_toml_hash: string,
-  auth_json_hash: string,
+  auth_json_hash: string | null,
+  env_file_hash: string | null,
   agents_md_hash: string | null,
+  review_catalog_path: string | null,
+  review_catalog_hash: string | null,
   recorded_at: string,
 }
 ```
@@ -445,6 +458,7 @@ pre-claudex/
   config.toml          # exact byte copy before first codexx use
   auth.json            # exact byte copy (may be absent if user had no auth.json)
   AGENTS.md            # exact byte copy (may be absent)
+  review-catalog.json  # model_catalog_json target, when configured
   manifest.json        # {ts, codex_version, codexx_version, hashes}
 ```
 
@@ -458,6 +472,8 @@ Path: `~/.config/claudex-cli/codex-backups/<ISO 8601>/`
 <timestamp>/
   config.toml
   auth.json
+  .env
+  review-catalog.json  # when model_catalog_json is configured
   reason.txt           # "switch to openrouter", "user requested", etc.
   hashes.json
 ```
@@ -479,6 +495,7 @@ interface AuditEvent {
     | "remove"
     | "revert"
     | "restore"
+    | "sync-review"
     | "snapshot"
     | "drift_detected"
     | "chatgpt_backed_up"
@@ -559,7 +576,10 @@ async function applyProviderSwitch(provider):
     parseTOML(configNext)
     parseJSON(authNext)
 
-    backupDir = await takeBackup({ reason: f"switch to {provider.name}" })
+    backupDir = await takeBackup({ reason: f"switch to {provider.name}", includeReviewCatalog: true })
+
+    # Catalog loads only at Codex startup; write it before config.toml.
+    await syncReviewCatalog(configNext, provider)
 
     # Write auth.json first (smaller, simpler rollback)
     await writeAtomic("~/.codex/auth.json", authNext, mode=0o600)
@@ -567,7 +587,7 @@ async function applyProviderSwitch(provider):
     try:
       await writeAtomic("~/.codex/config.toml", configNext)
     catch e:
-      # Roll back auth.json
+      # Roll back auth.json + review catalog
       if authBefore: await writeAtomic("~/.codex/auth.json", authBefore, mode=0o600)
       else: await fs.unlink("~/.codex/auth.json")
       throw e
@@ -792,7 +812,7 @@ All Open Questions from the original draft have been resolved during M1–M6 imp
 | # | Question | Resolution |
 |---|---|---|
 | Q1 | Default `wire_api`: `chat` or `responses`? | `chat` (implemented as default in `cmdAdd` wizard and flag mode). |
-| Q2 | `codexx use` auto-prompt to restart running codex/App? | Only print hint; codex >= v0.130 hot-reloads automatically, doctor reflects this. |
+| Q2 | `codexx use` auto-prompt to restart running codex/App? | Print a hint whenever the App is running. Provider config hot-reloads on codex >= v0.130, but review-catalog changes require a full restart. |
 | Q3 | AGENTS.md injection: when to auto-prompt? | Only on explicit `codexx native on`; never auto-injected. |
 | Q4 | `codexx update` semantics? | Self-update; `codexx -- update` passes through to `codex update`. |
 | Q5 | Shell alias prompt in `codexx init`? | No prompt today; users keep typing `codexx`. Optional `npm link` for development. |

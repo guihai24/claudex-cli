@@ -267,6 +267,48 @@ test('doctor: provider_inventory counts providers', async () => {
   });
 });
 
+test('doctor: review_catalog passes after use syncs the configured model', async () => {
+  await withIsolatedHome(async ({ codexHome }) => {
+    const catalogPath = path.join(codexHome, 'model-catalog-auto-review.json');
+    await fsp.writeFile(
+      path.join(codexHome, 'config.toml'),
+      `model_catalog_json = ${JSON.stringify(catalogPath)}\n`
+    );
+    await fsp.writeFile(catalogPath, JSON.stringify({
+      models: [{ slug: PROVIDER.model, display_name: 'Claude', visibility: 'list' }]
+    }));
+    await writeProvider(PROVIDER);
+    await applyProviderSwitch(PROVIDER);
+
+    const checks = await runDoctor();
+    const c = findCheck(checks, 'review_catalog');
+    assert.equal(c.status, 'pass');
+    assert.ok(c.message.includes(PROVIDER.model));
+  });
+});
+
+test('doctor: review_catalog warns when the catalog override was removed', async () => {
+  await withIsolatedHome(async ({ codexHome }) => {
+    const catalogPath = path.join(codexHome, 'model-catalog-auto-review.json');
+    await fsp.writeFile(
+      path.join(codexHome, 'config.toml'),
+      `model_catalog_json = ${JSON.stringify(catalogPath)}\n`
+    );
+    await fsp.writeFile(catalogPath, JSON.stringify({
+      models: [{ slug: PROVIDER.model, display_name: 'Claude', visibility: 'list' }]
+    }));
+    await writeProvider(PROVIDER);
+    await applyProviderSwitch(PROVIDER);
+    const changed = JSON.parse(await fsp.readFile(catalogPath, 'utf8'));
+    delete changed.models[0].auto_review_model_override;
+    await fsp.writeFile(catalogPath, JSON.stringify(changed));
+
+    const checks = await runDoctor();
+    const c = findCheck(checks, 'review_catalog');
+    assert.equal(c.status, 'warn');
+  });
+});
+
 // ===== formatting / summary =====
 
 test('formatDoctorReport: contains every check name', async () => {

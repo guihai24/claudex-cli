@@ -28,7 +28,9 @@ import {
 } from './constants.js';
 import {
   exists,
-  ensureDir
+  ensureDir,
+  sha256,
+  sha256File
 } from '../shared/fs-utils.js';
 import {
   listProviders,
@@ -48,9 +50,10 @@ import { revertToPreClaudex, restoreBackup } from './revert.js';
 import {
   ensurePreClaudexSnapshot,
   listBackups,
-  readSnapshotManifest
+  readSnapshotManifest,
+  takeBackup
 } from './snapshot.js';
-import { tailAuditLog } from './audit.js';
+import { appendAuditEvent, readLastKnownHashes, tailAuditLog, writeLastKnownHashes } from './audit.js';
 import { readAuthJson, inspectAuthJson } from './auth-json.js';
 import { runDoctor, formatDoctorReport, summariseStatus } from './doctor.js';
 import { inspectDrift, acceptExternalChanges } from './reconcile.js';
@@ -64,6 +67,13 @@ import {
   preflight
 } from './launch.js';
 import { resolveCommand } from '../shared/resolve-launcher.js';
+import {
+  inspectReviewCatalog,
+  resolveReviewCatalogPath,
+  reviewModelForProvider,
+  syncReviewCatalog
+} from './review-catalog.js';
+import { readEnvFile } from './env-file.js';
 
 const PKG_VERSION = '0.1.0';
 
@@ -77,6 +87,7 @@ const CLAUDEX_OWNED = new Set([
   'remove',
   'test',
   'status',
+  'sync-review',
   'doctor',
   'lang',
   'update',
@@ -135,7 +146,7 @@ export async function main(argv = process.argv.slice(2)) {
   const sub = first;
   const rest = argv.slice(1);
 
-  if (['init', 'menu', 'add', 'edit', 'list', 'use', 'remove', 'test', 'status', 'doctor', 'lang'].includes(sub) &&
+  if (['init', 'menu', 'add', 'edit', 'list', 'use', 'remove', 'test', 'status', 'sync-review', 'doctor', 'lang'].includes(sub) &&
       (rest.includes('--help') || rest.includes('-h'))) {
     usage(lang);
     return 0;
@@ -161,6 +172,8 @@ export async function main(argv = process.argv.slice(2)) {
         return await cmdTest(rest, lang);
       case 'status':
         return await cmdStatus(rest, lang);
+      case 'sync-review':
+        return await cmdSyncReview(rest, lang);
       case 'doctor':
         return await cmdDoctor(rest, lang);
       case 'lang':
@@ -211,13 +224,14 @@ function usage(lang) {
   out.push(t(lang, 'usageMgmt'));
   out.push('  codexx init                     # initialise state dir + check codex install');
   out.push('  codexx menu                     # interactive menu');
-  out.push('  codexx add [--test|--no-test|--no-input] # add provider via wizard');
-  out.push('  codexx edit <name> [--model X --base-url U --api-key K --wire-api chat|responses --reasoning-effort low|medium|high]');
+  out.push('  codexx add [--review-model X|main] [--test|--no-test|--no-input] # add provider via wizard');
+  out.push('  codexx edit <name> [--model X --review-model X|main --base-url U --api-key K --wire-api chat|responses --reasoning-effort low|medium|high]');
   out.push('  codexx list                     # list providers');
   out.push('  codexx use <name|index>         # switch active provider');
   out.push('  codexx remove <name|index> [--yes] [--no-input]');
   out.push('  codexx test [name|index]        # provider connectivity test');
   out.push('  codexx status                   # show active provider summary');
+  out.push('  codexx sync-review [model]      # sync auto-review catalog after a Desktop model picker change');
   out.push('  codexx lang <zh|en>             # set CLI language');
   out.push('');
   out.push(t(lang, 'usageDiag'));
@@ -371,10 +385,19 @@ async function cmdList(args, lang) {
   }
   const active = await getCurrentProvider();
   process.stdout.write(t(lang, 'providersHeader') + '\n');
-  names.forEach((n, i) => {
+  for (const [i, n] of names.entries()) {
     const mark = n === active ? t(lang, 'activeMark') : '';
-    process.stdout.write(`  ${i + 1}. ${n}${mark}\n`);
-  });
+    let detail = '';
+    try {
+      const p = await readProvider(n);
+      const reviewModel = reviewModelForProvider(p);
+      const suffix = p.auto_review_model ? '' : t(lang, 'reviewFollowsMainSuffix');
+      detail = ` — ${p.model}; review: ${reviewModel}${suffix}`;
+    } catch {
+      detail = ' — metadata missing';
+    }
+    process.stdout.write(`  ${i + 1}. ${n}${mark}${detail}\n`);
+  }
   return 0;
 }
 
@@ -382,17 +405,36 @@ async function cmdList(args, lang) {
 
 async function cmdStatus(args, lang) {
   const active = await getCurrentProvider();
+  let activeProvider = null;
   if (!active) {
     process.stdout.write(t(lang, 'noActiveProvider') + '\n');
   } else {
     process.stdout.write(t(lang, 'currentProvider', { v: active }) + '\n');
     try {
       const p = await readProvider(active);
+      activeProvider = p;
       process.stdout.write(t(lang, 'currentEndpoint', { v: p.base_url }) + '\n');
       process.stdout.write(t(lang, 'currentModel', { v: p.model }) + '\n');
+      process.stdout.write(t(lang, 'currentReviewModel', {
+        v: reviewModelForProvider(p),
+        suffix: p.auto_review_model ? '' : t(lang, 'reviewFollowsMainSuffix')
+      }) + '\n');
       process.stdout.write(t(lang, 'currentWireApi', { v: p.wire_api || 'responses' }) + '\n');
     } catch {
       process.stdout.write(t(lang, 'providerMissing', { v: active }) + '\n');
+    }
+  }
+
+  if (activeProvider) {
+    const configPath = codexConfigTomlPath();
+    if (await exists(configPath)) {
+      try {
+        const configText = await fsp.readFile(configPath, 'utf8');
+        const review = await inspectReviewCatalog(configText, activeProvider, { configTomlPath: configPath });
+        process.stdout.write(t(lang, 'currentReviewCatalog', { v: review.status }) + '\n');
+      } catch (err) {
+        process.stdout.write(t(lang, 'currentReviewCatalog', { v: `error: ${err.message}` }) + '\n');
+      }
     }
   }
 
@@ -426,11 +468,19 @@ async function cmdStatus(args, lang) {
 
 async function cmdAdd(args, lang) {
   const flags = parseFlags(args);
+  const reviewFlagPresent = 'review-model' in flags || 'reviewModel' in flags;
+  const reviewFlagValue = flags['review-model'] ?? flags.reviewModel;
+  if (reviewFlagPresent && typeof reviewFlagValue !== 'string') {
+    process.stderr.write(t(lang, 'missingArg', { v: '--review-model' }) + '\n');
+    return 2;
+  }
+  const reviewModel = normalizeReviewModelFlag(reviewFlagValue);
   const provider = {
     name: flags.name,
     base_url: flags['base-url'] || flags.baseUrl,
     api_key: flags['api-key'] || flags.apiKey || process.env.CODEXX_API_KEY,
     model: flags.model,
+    auto_review_model: reviewModel,
     wire_api: flags['wire-api'] || flags.wireApi || 'responses',
     model_reasoning_effort: flags['reasoning-effort'] || flags.reasoningEffort || 'high'
   };
@@ -456,6 +506,11 @@ async function cmdAdd(args, lang) {
       if (!provider.base_url) provider.base_url = (await rl.question(t(lang, 'askBaseUrl'))).trim();
       if (!provider.api_key) provider.api_key = (await rl.question(t(lang, 'askApiKey'))).trim();
       if (!provider.model) provider.model = (await rl.question(t(lang, 'askModel'))).trim();
+      if (!reviewFlagPresent) {
+        const r = (await rl.question(t(lang, 'askReviewModel'))).trim();
+        const normalized = normalizeReviewModelFlag(r);
+        if (normalized) provider.auto_review_model = normalized;
+      }
       if (!flags['wire-api'] && !flags.wireApi) {
         const w = (await rl.question(t(lang, 'askWireApi'))).trim();
         if (w) provider.wire_api = w;
@@ -471,6 +526,7 @@ async function cmdAdd(args, lang) {
 
   // Drop empty optional fields
   if (!provider.model_reasoning_effort) delete provider.model_reasoning_effort;
+  if (!provider.auto_review_model) delete provider.auto_review_model;
 
   // Normalise base_url: append /v1 if user gave just a bare domain.
   // Tell the user what we changed so the normalisation isn't silent.
@@ -502,6 +558,14 @@ function maskApiKey(key) {
   return key.slice(0, 7) + '...' + key.slice(-4);
 }
 
+function normalizeReviewModelFlag(value) {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  if (['main', 'follow', 'same'].includes(normalized.toLowerCase())) return undefined;
+  return normalized;
+}
+
 async function cmdEdit(args, lang) {
   const flags = parseFlags(args);
   if (flags._.length === 0) {
@@ -517,6 +581,8 @@ async function cmdEdit(args, lang) {
     'api-key': 'api_key',
     'apiKey': 'api_key',
     'model': 'model',
+    'review-model': 'auto_review_model',
+    'reviewModel': 'auto_review_model',
     'wire-api': 'wire_api',
     'wireApi': 'wire_api',
     'reasoning-effort': 'model_reasoning_effort',
@@ -525,7 +591,9 @@ async function cmdEdit(args, lang) {
   const updates = {};
   for (const [flagKey, field] of Object.entries(fieldMap)) {
     if (flagKey in flags && typeof flags[flagKey] === 'string') {
-      updates[field] = flags[flagKey];
+      updates[field] = field === 'auto_review_model'
+        ? (normalizeReviewModelFlag(flags[flagKey]) ?? null)
+        : flags[flagKey];
     }
   }
 
@@ -533,7 +601,7 @@ async function cmdEdit(args, lang) {
   if (Object.keys(updates).length === 0) {
     if (!interactive) {
       process.stderr.write(
-        t(lang, 'missingArg', { v: '--base-url / --api-key / --model / --wire-api / --reasoning-effort 至少一个' }) + '\n'
+        t(lang, 'missingArg', { v: '--base-url / --api-key / --model / --review-model / --wire-api / --reasoning-effort 至少一个' }) + '\n'
       );
       return 2;
     }
@@ -549,11 +617,21 @@ async function cmdEdit(args, lang) {
       await askField('base_url', current.base_url, 'base_url', '');
       await askField('api_key', current.api_key, 'api_key', '');
       await askField('model', current.model, 'model', '');
+      await askField(
+        'auto_review_model',
+        current.auto_review_model || t(lang, 'reviewFollowsMain'),
+        'auto_review_model',
+        'model slug / main'
+      );
       await askField('wire_api', current.wire_api, 'wire_api', 'chat / responses');
       await askField('model_reasoning_effort', current.model_reasoning_effort, 'reasoning_effort', 'low / medium / high');
     } finally {
       rl.close();
     }
+  }
+
+  if (Object.hasOwn(updates, 'auto_review_model')) {
+    updates.auto_review_model = normalizeReviewModelFlag(updates.auto_review_model) ?? null;
   }
 
   if (Object.keys(updates).length === 0) {
@@ -670,6 +748,11 @@ async function cmdUse(args, lang) {
   process.stdout.write(t(lang, 'switchedTo', { v: provider.name }) + '\n');
   process.stdout.write(t(lang, 'switchEndpoint', { v: provider.base_url }) + '\n');
   process.stdout.write(t(lang, 'switchModel', { v: provider.model }) + '\n');
+  process.stdout.write(t(lang, 'switchReviewModel', {
+    v: result.reviewCatalog.reviewModel,
+    suffix: provider.auto_review_model ? '' : t(lang, 'reviewFollowsMainSuffix')
+  }) + '\n');
+  process.stdout.write(t(lang, 'reviewCatalogStatus', { v: result.reviewCatalog.status }) + '\n');
   process.stdout.write(t(lang, 'backupAt', { v: result.backupDir }) + '\n');
   if (result.chatgptBackupPath) {
     process.stdout.write(t(lang, 'chatgptBackupAt', { v: result.chatgptBackupPath }) + '\n');
@@ -679,6 +762,93 @@ async function cmdUse(args, lang) {
   if (app && app.running) {
     process.stdout.write(t(lang, 'restartCodexHint') + '\n');
   }
+  return 0;
+}
+
+// ----- sync-review -----
+
+async function cmdSyncReview(args, lang) {
+  const flags = parseFlags(args);
+  const active = await getCurrentProvider();
+  if (!active) {
+    process.stderr.write(t(lang, 'noActiveProvider') + '\n');
+    return 2;
+  }
+
+  let provider;
+  try {
+    provider = await readProvider(active);
+  } catch (err) {
+    process.stderr.write(t(lang, 'opFailed', { v: err.message }) + '\n');
+    return 1;
+  }
+
+  const requestedModel = flags._[0] || flags.model;
+  if (requestedModel && typeof requestedModel !== 'string') {
+    process.stderr.write(t(lang, 'missingArg', { v: 'model' }) + '\n');
+    return 2;
+  }
+  const reviewModel = requestedModel
+    ? requestedModel.trim()
+    : reviewModelForProvider(provider);
+  if (!reviewModel) {
+    process.stderr.write(t(lang, 'missingArg', { v: 'model' }) + '\n');
+    return 2;
+  }
+
+  const configPath = codexConfigTomlPath();
+  if (!(await exists(configPath))) {
+    process.stderr.write(t(lang, 'opFailed', { v: 'config.toml not found' }) + '\n');
+    return 1;
+  }
+  const configText = await fsp.readFile(configPath, 'utf8');
+  const catalogPath = resolveReviewCatalogPath(configText, { configTomlPath: configPath });
+  if (!catalogPath) {
+    process.stderr.write(t(lang, 'reviewCatalogNotConfigured') + '\n');
+    return 1;
+  }
+  if (!(await exists(catalogPath))) {
+    process.stderr.write(t(lang, 'opFailed', { v: `review catalog not found: ${catalogPath}` }) + '\n');
+    return 1;
+  }
+
+  const backupDir = await takeBackup(`sync review model ${reviewModel}`, {
+    reviewCatalogPath: catalogPath
+  });
+  const syncProvider = { ...provider, auto_review_model: reviewModel };
+  const result = await syncReviewCatalog(configText, syncProvider, {
+    configTomlPath: configPath,
+    catalogPath
+  });
+  if (result.status !== 'synced' && result.status !== 'already-synced') {
+    process.stderr.write(t(lang, 'opFailed', { v: `catalog ${result.status}` }) + '\n');
+    return 1;
+  }
+
+  const baseline = await readLastKnownHashes();
+  const auth = await readAuthJson();
+  const envText = await readEnvFile();
+  await writeLastKnownHashes({
+    config_toml_hash: baseline?.config_toml_hash ?? sha256(configText),
+    auth_json_hash: baseline?.auth_json_hash ?? (auth ? sha256(JSON.stringify(auth)) : null),
+    env_file_hash: baseline?.env_file_hash ?? (envText ? sha256(envText) : null),
+    agents_md_hash: baseline?.agents_md_hash ?? null,
+    review_catalog_path: catalogPath,
+    review_catalog_hash: await sha256File(catalogPath),
+    recorded_at: new Date().toISOString()
+  });
+  await appendAuditEvent({
+    action: 'sync-review',
+    provider: active,
+    review_model: reviewModel,
+    catalog_path: catalogPath,
+    catalog_status: result.status,
+    backup_dir: backupDir
+  });
+
+  process.stdout.write(t(lang, 'syncReviewOk', { model: reviewModel, provider: active }) + '\n');
+  process.stdout.write(t(lang, 'backupAt', { v: backupDir }) + '\n');
+  process.stdout.write(t(lang, 'restartCodexReviewHint') + '\n');
   return 0;
 }
 

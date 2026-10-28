@@ -272,6 +272,69 @@ test('apply-switch: backs up ChatGPT OAuth tokens before overwriting auth.json',
   });
 });
 
+test('apply-switch: syncs and backs up the auto-review catalog', async () => {
+  await withIsolatedHome(async ({ codexHome }) => {
+    const catalogPath = path.join(codexHome, 'model-catalog-auto-review.json');
+    const configPath = path.join(codexHome, 'config.toml');
+    await fsp.writeFile(
+      configPath,
+      SAMPLE_USER_CONFIG.replace(
+        '# personal codex config\n',
+        `# personal codex config\nmodel_catalog_json = ${JSON.stringify(catalogPath)}\n`
+      )
+    );
+    await fsp.writeFile(catalogPath, JSON.stringify({
+      models: [
+        { slug: PROVIDER_A.model, display_name: 'Claude', visibility: 'list' },
+        { slug: 'gpt-5.6-luna', display_name: 'Luna', visibility: 'list' }
+      ]
+    }, null, 2));
+
+    const result = await applyProviderSwitch(PROVIDER_A);
+    assert.equal(result.reviewCatalog.status, 'synced');
+    assert.equal(result.reviewCatalog.reviewModel, PROVIDER_A.model);
+
+    const catalog = JSON.parse(await fsp.readFile(catalogPath, 'utf8'));
+    const entry = catalog.models.find((m) => m.slug === PROVIDER_A.model);
+    assert.equal(entry.auto_review_model_override, PROVIDER_A.model);
+    assert.ok(fs.existsSync(path.join(result.backupDir, 'review-catalog.json')));
+
+    const baseline = await readLastKnownHashes();
+    assert.equal(baseline.review_catalog_path, catalogPath);
+    assert.ok(baseline.review_catalog_hash);
+  });
+});
+
+test('apply-switch: reports auto-review catalog drift', async () => {
+  await withIsolatedHome(async ({ codexHome }) => {
+    const catalogPath = path.join(codexHome, 'model-catalog-auto-review.json');
+    const configPath = path.join(codexHome, 'config.toml');
+    await fsp.writeFile(
+      configPath,
+      `model_catalog_json = ${JSON.stringify(catalogPath)}\nmodel = "gpt-5.5"\n`
+    );
+    await fsp.writeFile(catalogPath, JSON.stringify({
+      models: [
+        { slug: PROVIDER_A.model, display_name: 'Claude', visibility: 'list' },
+        { slug: PROVIDER_B.model, display_name: 'GPT', visibility: 'list' }
+      ]
+    }));
+    await applyProviderSwitch(PROVIDER_A);
+
+    const changed = JSON.parse(await fsp.readFile(catalogPath, 'utf8'));
+    changed.models.push({ slug: 'external-change', display_name: 'External', visibility: 'hide' });
+    await fsp.writeFile(catalogPath, JSON.stringify(changed));
+
+    let report = null;
+    await applyProviderSwitch(PROVIDER_B, {
+      previousProvider: 'openrouter',
+      onDrift: (d) => { report = d; return true; }
+    });
+    assert.ok(report);
+    assert.ok(report.driftedFiles.includes('review catalog'));
+  });
+});
+
 test('restoreBackup: restores a prior backup', async () => {
   await withIsolatedHome(async ({ codexHome }) => {
     const configPath = path.join(codexHome, 'config.toml');

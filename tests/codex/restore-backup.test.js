@@ -78,8 +78,8 @@ test('restoreBackup: restores all three files from a complete backup', async () 
     await seedLiveFiles(codexHome, 'v2');
 
     const r = await restoreBackup('latest', { appendAudit: false });
-    assert.deepEqual(r.restored, { config_toml: true, auth_json: true, env_file: true });
-    assert.deepEqual(r.deleted, { config_toml: false, auth_json: false, env_file: false });
+    assert.deepEqual(r.restored, { config_toml: true, auth_json: true, env_file: true, review_catalog: false });
+    assert.deepEqual(r.deleted, { config_toml: false, auth_json: false, env_file: false, review_catalog: false });
     const live = await liveState(codexHome);
     assert.equal(live['config.toml'], 'model = "v1"\n');
     assert.equal(live['auth.json'], '{"OPENAI_API_KEY":"v1"}\n');
@@ -95,6 +95,57 @@ test('restoreBackup: config.toml keeps 0600 after restore', async () => {
     await restoreBackup('latest', { appendAudit: false });
     const stat = await fsp.stat(path.join(codexHome, 'config.toml'));
     assert.equal(stat.mode & 0o777, 0o600);
+  });
+});
+
+test('restoreBackup: restores the auto-review catalog captured in the backup', async () => {
+  await withIsolatedHome(async ({ codexHome }) => {
+    const catalogPath = path.join(codexHome, 'model-catalog-auto-review.json');
+    await fsp.writeFile(
+      path.join(codexHome, 'config.toml'),
+      `model_catalog_json = ${JSON.stringify(catalogPath)}\nmodel = "v1"\n`
+    );
+    await fsp.writeFile(catalogPath, '{"models":[{"slug":"review-v1"}]}\n');
+    await takeBackup('catalog v1');
+
+    await fsp.writeFile(catalogPath, '{"models":[{"slug":"review-v2"}]}\n');
+    const r = await restoreBackup('latest', { appendAudit: false });
+    assert.equal(r.restored.review_catalog, true);
+    assert.equal(
+      await fsp.readFile(catalogPath, 'utf8'),
+      '{"models":[{"slug":"review-v1"}]}\n'
+    );
+  });
+});
+
+test('restoreBackup: pre-restore backup captures the current catalog when the path changed', async () => {
+  await withIsolatedHome(async ({ codexHome }) => {
+    const oldCatalog = path.join(codexHome, 'old-catalog.json');
+    const newCatalog = path.join(codexHome, 'new-catalog.json');
+    const configPath = path.join(codexHome, 'config.toml');
+    await fsp.writeFile(
+      configPath,
+      `model_catalog_json = ${JSON.stringify(oldCatalog)}\nmodel = "old"\n`
+    );
+    await fsp.writeFile(oldCatalog, '{"models":[{"slug":"old-review"}]}\n');
+    await takeBackup('old catalog path');
+
+    await fsp.writeFile(
+      configPath,
+      `model_catalog_json = ${JSON.stringify(newCatalog)}\nmodel = "new"\n`
+    );
+    await fsp.writeFile(newCatalog, '{"models":[{"slug":"new-review"}]}\n');
+
+    const r = await restoreBackup('latest', { appendAudit: false });
+    assert.equal(r.restored.review_catalog, true);
+    assert.equal(
+      await fsp.readFile(path.join(r.preBackupDir, 'review-catalog.json'), 'utf8'),
+      '{"models":[{"slug":"new-review"}]}\n'
+    );
+    assert.equal(
+      await fsp.readFile(oldCatalog, 'utf8'),
+      '{"models":[{"slug":"old-review"}]}\n'
+    );
   });
 });
 

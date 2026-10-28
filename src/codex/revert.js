@@ -11,9 +11,16 @@ import {
   codexLastKnownHashesPath,
   codexBackupsDir
 } from './constants.js';
-import { exists, ensureDir, writeAtomic } from '../shared/fs-utils.js';
-import { readSnapshotManifest, listBackups, takeBackup } from './snapshot.js';
+import { exists, readJson, writeAtomic } from '../shared/fs-utils.js';
+import {
+  BACKUP_MANIFEST_FILE,
+  REVIEW_CATALOG_BACKUP_FILE,
+  readSnapshotManifest,
+  listBackups,
+  takeBackup
+} from './snapshot.js';
 import { appendAuditEvent } from './audit.js';
+import { resolveReviewCatalogPathFromFile } from './review-catalog.js';
 
 /**
  * Restore ~/.codex/ to the pre-claudex snapshot.
@@ -38,8 +45,8 @@ export async function revertToPreClaudex(opts = {}) {
   }
 
   const result = {
-    restored: { config_toml: false, auth_json: false, agents_md: false, env_file: false },
-    deleted: { auth_json: false, agents_md: false, env_file: false, current_provider: false, last_known_hashes: false, backups: false }
+    restored: { config_toml: false, auth_json: false, agents_md: false, env_file: false, review_catalog: false },
+    deleted: { auth_json: false, agents_md: false, env_file: false, review_catalog: false, current_provider: false, last_known_hashes: false, backups: false }
   };
 
   // config.toml
@@ -70,6 +77,23 @@ export async function revertToPreClaudex(opts = {}) {
   } else if (await exists(envPath)) {
     await fsp.unlink(envPath);
     result.deleted.env_file = true;
+  }
+
+  // Auto-review model catalog (new snapshots only; leave it alone for legacy
+  // snapshots that never recorded this path).
+  const snapReviewCatalog = path.join(snapshotDir, REVIEW_CATALOG_BACKUP_FILE);
+  const reviewCatalogPath = manifest.paths?.review_catalog || null;
+  if (reviewCatalogPath && await exists(snapReviewCatalog)) {
+    const txt = await fsp.readFile(snapReviewCatalog, 'utf8');
+    await writeAtomic(reviewCatalogPath, txt);
+    result.restored.review_catalog = true;
+  } else if (
+    reviewCatalogPath &&
+    Object.hasOwn(manifest.hashes || {}, 'review_catalog') &&
+    await exists(reviewCatalogPath)
+  ) {
+    await fsp.unlink(reviewCatalogPath);
+    result.deleted.review_catalog = true;
   }
 
   // AGENTS.md
@@ -163,8 +187,18 @@ export async function restoreBackup(id, opts = {}) {
   const configPath = opts.configTomlPath || codexConfigTomlPath();
   const authPath = opts.authJsonPath || codexAuthJsonPath();
   const envPath = opts.envFilePath || codexEnvFilePath();
-  const restored = { config_toml: false, auth_json: false, env_file: false };
-  const deleted = { config_toml: false, auth_json: false, env_file: false };
+  const restored = { config_toml: false, auth_json: false, env_file: false, review_catalog: false };
+  const deleted = { config_toml: false, auth_json: false, env_file: false, review_catalog: false };
+
+  const backupManifest = await readJson(path.join(target.dir, BACKUP_MANIFEST_FILE));
+  const backupConfigPath = path.join(target.dir, 'config.toml');
+  const reviewCatalogPath = opts.reviewCatalogPath !== undefined
+    ? opts.reviewCatalogPath
+    : backupManifest.paths?.review_catalog ||
+      await resolveReviewCatalogPathFromFile({ configTomlPath: backupConfigPath });
+  const currentReviewCatalogPath = opts.currentReviewCatalogPath !== undefined
+    ? opts.currentReviewCatalogPath
+    : await resolveReviewCatalogPathFromFile({ configTomlPath: configPath });
 
   let preBackupDir = null;
   if (opts.preBackup !== false) {
@@ -172,7 +206,8 @@ export async function restoreBackup(id, opts = {}) {
       root: opts.root,
       configTomlPath: configPath,
       authJsonPath: authPath,
-      envFilePath: envPath
+      envFilePath: envPath,
+      reviewCatalogPath: currentReviewCatalogPath
     });
   }
 
@@ -190,6 +225,20 @@ export async function restoreBackup(id, opts = {}) {
       await fsp.unlink(filePath);
       deleted[key] = true;
     }
+  }
+
+  const reviewCatalogBackup = path.join(target.dir, REVIEW_CATALOG_BACKUP_FILE);
+  if (reviewCatalogPath && await exists(reviewCatalogBackup)) {
+    const txt = await fsp.readFile(reviewCatalogBackup, 'utf8');
+    await writeAtomic(reviewCatalogPath, txt);
+    restored.review_catalog = true;
+  } else if (
+    reviewCatalogPath &&
+    Object.hasOwn(backupManifest.hashes || {}, 'review_catalog') &&
+    await exists(reviewCatalogPath)
+  ) {
+    await fsp.unlink(reviewCatalogPath);
+    deleted.review_catalog = true;
   }
 
   if (opts.appendAudit !== false) {

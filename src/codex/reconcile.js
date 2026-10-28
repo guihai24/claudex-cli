@@ -13,6 +13,7 @@ import {
   appendAuditEvent
 } from './audit.js';
 import { readAuthJson } from './auth-json.js';
+import { resolveReviewCatalogPathFromFile } from './review-catalog.js';
 
 /**
  * Inspect the current state vs codexx's last-known baseline.
@@ -24,6 +25,9 @@ export async function inspectDrift() {
   const configPath = codexConfigTomlPath();
   const authPath = codexAuthJsonPath();
   const envPath = codexEnvFilePath();
+  const reviewCatalogPath = await resolveReviewCatalogPathFromFile({
+    configTomlPath: configPath
+  });
 
   const currentConfigHash = (await exists(configPath))
     ? await sha256File(configPath)
@@ -33,8 +37,11 @@ export async function inspectDrift() {
   const currentEnvHash = (await exists(envPath))
     ? await sha256File(envPath)
     : null;
+  const currentReviewCatalogHash = reviewCatalogPath && (await exists(reviewCatalogPath))
+    ? await sha256File(reviewCatalogPath)
+    : null;
 
-  const drift = { config: null, auth: null, env: null };
+  const drift = { config: null, auth: null, env: null, reviewCatalog: null };
   if (baseline) {
     if (baseline.config_toml_hash && baseline.config_toml_hash !== currentConfigHash) {
       drift.config = { before: baseline.config_toml_hash, after: currentConfigHash };
@@ -47,6 +54,16 @@ export async function inspectDrift() {
     if (baseline.env_file_hash && baseline.env_file_hash !== currentEnvHash) {
       drift.env = { before: baseline.env_file_hash, after: currentEnvHash };
     }
+    if (
+      baseline.review_catalog_hash &&
+      baseline.review_catalog_path === reviewCatalogPath &&
+      baseline.review_catalog_hash !== currentReviewCatalogHash
+    ) {
+      drift.reviewCatalog = {
+        before: baseline.review_catalog_hash,
+        after: currentReviewCatalogHash
+      };
+    }
   }
 
   return {
@@ -54,7 +71,9 @@ export async function inspectDrift() {
     current: {
       config_toml_hash: currentConfigHash,
       auth_json_hash: currentAuthHash,
-      env_file_hash: currentEnvHash
+      env_file_hash: currentEnvHash,
+      review_catalog_path: reviewCatalogPath,
+      review_catalog_hash: currentReviewCatalogHash
     },
     drift
   };
@@ -70,6 +89,8 @@ export async function acceptExternalChanges() {
     config_toml_hash: inspection.current.config_toml_hash,
     auth_json_hash: inspection.current.auth_json_hash,
     env_file_hash: inspection.current.env_file_hash,
+    review_catalog_path: inspection.current.review_catalog_path,
+    review_catalog_hash: inspection.current.review_catalog_hash,
     recorded_at: new Date().toISOString()
   });
   await appendAuditEvent({

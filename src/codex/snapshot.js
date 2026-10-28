@@ -20,6 +20,9 @@ import {
   sha256File,
   isoStamp
 } from '../shared/fs-utils.js';
+import { resolveReviewCatalogPathFromFile } from './review-catalog.js';
+
+const REVIEW_CATALOG_BACKUP_FILE = 'review-catalog.json';
 
 /**
  * Capture the pre-claudex state of ~/.codex/ — exactly once.
@@ -36,12 +39,16 @@ export async function ensurePreClaudexSnapshot(opts = {}) {
   const authPath = opts.authJsonPath || codexAuthJsonPath();
   const agentsPath = opts.agentsMdPath || codexAgentsMdPath();
   const envPath = opts.envFilePath || codexEnvFilePath();
+  const reviewCatalogPath = opts.reviewCatalogPath !== undefined
+    ? opts.reviewCatalogPath
+    : await resolveReviewCatalogPathFromFile({ configTomlPath: configPath });
 
   const manifest = {
     schema_version: SCHEMA_VERSION,
     ts: new Date().toISOString(),
     codex_home: opts.codexHomePath || codexHome(),
-    hashes: {}
+    hashes: {},
+    paths: { review_catalog: reviewCatalogPath }
   };
 
   if (await exists(configPath)) {
@@ -78,6 +85,14 @@ export async function ensurePreClaudexSnapshot(opts = {}) {
     manifest.hashes.env_file = null;
   }
 
+  if (reviewCatalogPath && await exists(reviewCatalogPath)) {
+    const dst = path.join(dir, REVIEW_CATALOG_BACKUP_FILE);
+    await fsp.copyFile(reviewCatalogPath, dst);
+    manifest.hashes.review_catalog = await sha256File(dst);
+  } else {
+    manifest.hashes.review_catalog = null;
+  }
+
   await writeJson(manifestPath, manifest);
   return { taken: true, dir };
 }
@@ -105,7 +120,15 @@ export async function takeBackup(reason, opts = {}) {
   const configPath = opts.configTomlPath || codexConfigTomlPath();
   const authPath = opts.authJsonPath || codexAuthJsonPath();
   const envPath = opts.envFilePath || codexEnvFilePath();
-  const hashes = { config_toml: null, auth_json: null, env_file: null };
+  const reviewCatalogPath = opts.reviewCatalogPath !== undefined
+    ? opts.reviewCatalogPath
+    : await resolveReviewCatalogPathFromFile({ configTomlPath: configPath });
+  const hashes = {
+    config_toml: null,
+    auth_json: null,
+    env_file: null,
+    review_catalog: null
+  };
 
   if (await exists(configPath)) {
     const dst = path.join(dir, 'config.toml');
@@ -124,6 +147,11 @@ export async function takeBackup(reason, opts = {}) {
     await fsp.chmod(dst, 0o600);
     hashes.env_file = await sha256File(dst);
   }
+  if (reviewCatalogPath && await exists(reviewCatalogPath)) {
+    const dst = path.join(dir, REVIEW_CATALOG_BACKUP_FILE);
+    await fsp.copyFile(reviewCatalogPath, dst);
+    hashes.review_catalog = await sha256File(dst);
+  }
 
   await writeAtomic(
     path.join(dir, 'reason.txt'),
@@ -133,7 +161,8 @@ export async function takeBackup(reason, opts = {}) {
   await writeJson(path.join(dir, BACKUP_MANIFEST_FILE), {
     ts: stamp,
     reason: reason || null,
-    hashes
+    hashes,
+    paths: { review_catalog: reviewCatalogPath }
   });
 
   return dir;
@@ -141,6 +170,7 @@ export async function takeBackup(reason, opts = {}) {
 
 /** Written last by takeBackup, so its presence marks a backup as complete. */
 export const BACKUP_MANIFEST_FILE = 'hashes.json';
+export { REVIEW_CATALOG_BACKUP_FILE };
 
 /**
  * List all timestamped backups, newest first.

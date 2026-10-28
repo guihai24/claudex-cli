@@ -32,6 +32,10 @@ import {
   writeLastKnownHashes,
   readLastKnownHashes
 } from './audit.js';
+import {
+  resolveReviewCatalogPath,
+  syncReviewCatalog
+} from './review-catalog.js';
 
 /**
  * Atomic provider switch — the heart of `codexx use <name>`.
@@ -79,6 +83,19 @@ export async function applyProviderSwitch(provider, opts = {}) {
     const authHashBefore = authBefore ? sha256(JSON.stringify(authBefore)) : null;
     const envHashBefore = envBeforeText ? sha256(envBeforeText) : null;
 
+    const applyResult = applyClaudexProvider(configBeforeText, provider, opts.buildOpts);
+    const configNextText = applyResult.next;
+    const reviewCatalogPath = resolveReviewCatalogPath(configNextText, {
+      configTomlPath: configPath,
+      catalogPath: opts.reviewCatalogPath
+    });
+    const reviewCatalogBeforeText = reviewCatalogPath && await exists(reviewCatalogPath)
+      ? await fsp.readFile(reviewCatalogPath, 'utf8')
+      : null;
+    const reviewCatalogHashBefore = reviewCatalogBeforeText === null
+      ? null
+      : sha256(reviewCatalogBeforeText);
+
     // 3) Drift detection
     let drift = null;
     if (opts.driftCheck !== false) {
@@ -96,6 +113,13 @@ export async function applyProviderSwitch(provider, opts = {}) {
         if (lastKnown.env_file_hash && lastKnown.env_file_hash !== envHashBefore) {
           driftedFiles.push('.env');
         }
+        if (
+          lastKnown.review_catalog_path === reviewCatalogPath &&
+          lastKnown.review_catalog_hash &&
+          lastKnown.review_catalog_hash !== reviewCatalogHashBefore
+        ) {
+          driftedFiles.push('review catalog');
+        }
         if (driftedFiles.length > 0) {
           drift = { driftedFiles, lastKnown };
           if (opts.onDrift) {
@@ -111,8 +135,6 @@ export async function applyProviderSwitch(provider, opts = {}) {
     }
 
     // 4) Build target state
-    const applyResult = applyClaudexProvider(configBeforeText, provider, opts.buildOpts);
-    const configNextText = applyResult.next;
     const authNext = buildAuthForProvider(provider, opts.buildOpts);
     const envNextText = spliceClaudexEnv(envBeforeText, {
       OPENAI_API_KEY: provider.api_key
@@ -122,7 +144,9 @@ export async function applyProviderSwitch(provider, opts = {}) {
     parseConfigToml(configNextText);
 
     // 6) Backup before write
-    const backupDir = await takeBackup(`switch to ${provider.name}`);
+    const backupDir = await takeBackup(`switch to ${provider.name}`, {
+      reviewCatalogPath
+    });
 
     // 7) ChatGPT tokens backup
     let chatgptBackupPath = null;
@@ -133,19 +157,41 @@ export async function applyProviderSwitch(provider, opts = {}) {
       });
     }
 
-    // 8) Write auth.json
-    await writeAuthJson(authNext);
+    // 8) Sync the Codex auto-review catalog before switching config.toml.
+    // The catalog is loaded by Codex at startup, so writing it first avoids a
+    // successful model switch with stale approval metadata.
+    const catalogResult = await syncReviewCatalog(configNextText, provider, {
+      configTomlPath: configPath,
+      catalogPath: reviewCatalogPath
+    });
+    const restoreCatalog = async () => {
+      if (!catalogResult.changed || !reviewCatalogPath) return;
+      if (reviewCatalogBeforeText === null) {
+        if (await exists(reviewCatalogPath)) await fsp.unlink(reviewCatalogPath);
+      } else {
+        await writeAtomic(reviewCatalogPath, reviewCatalogBeforeText);
+      }
+    };
 
-    // 9) Write .env; rollback auth on failure
+    // 9) Write auth.json
+    try {
+      await writeAuthJson(authNext);
+    } catch (err) {
+      await restoreCatalog();
+      throw new Error(`auth.json write failed; rolled back review catalog: ${err.message}`);
+    }
+
+    // 10) Write .env; rollback auth + catalog on failure
     try {
       await writeEnvFile(envNextText);
     } catch (err) {
       if (authBefore) await writeAuthJson(authBefore);
       else if (await exists(authPath)) await fsp.unlink(authPath);
-      throw new Error(`.env write failed; rolled back auth.json: ${err.message}`);
+      await restoreCatalog();
+      throw new Error(`.env write failed; rolled back auth.json + review catalog: ${err.message}`);
     }
 
-    // 10) Write config.toml; rollback .env + auth on failure
+    // 11) Write config.toml; rollback .env + auth + catalog on failure
     try {
       await writeAtomic(configPath, configNextText);
     } catch (err) {
@@ -155,12 +201,13 @@ export async function applyProviderSwitch(provider, opts = {}) {
       // rollback auth
       if (authBefore) await writeAuthJson(authBefore);
       else if (await exists(authPath)) await fsp.unlink(authPath);
+      await restoreCatalog();
       throw new Error(
-        `config.toml write failed; rolled back auth.json + .env: ${err.message}`
+        `config.toml write failed; rolled back auth.json + .env + review catalog: ${err.message}`
       );
     }
 
-    // 11) Post-verify
+    // 12) Post-verify
     const configActual = await fsp.readFile(configPath, 'utf8');
     const verifyResult = verifyNonClaudexUntouched(configBeforeText, configActual);
     if (!verifyResult.ok) {
@@ -174,17 +221,25 @@ export async function applyProviderSwitch(provider, opts = {}) {
     const configHashAfter = sha256(configActual);
     const authHashAfter = authActual ? sha256(JSON.stringify(authActual)) : null;
     const envHashAfter = envActual ? sha256(envActual) : null;
+    const reviewCatalogAfterText = reviewCatalogPath && await exists(reviewCatalogPath)
+      ? await fsp.readFile(reviewCatalogPath, 'utf8')
+      : null;
+    const reviewCatalogHashAfter = reviewCatalogAfterText === null
+      ? null
+      : sha256(reviewCatalogAfterText);
 
-    // 12) Update state
+    // 13) Update state
     await setCurrentProvider(provider.name);
     await writeLastKnownHashes({
       config_toml_hash: configHashAfter,
       auth_json_hash: authHashAfter,
       env_file_hash: envHashAfter,
+      review_catalog_path: reviewCatalogPath,
+      review_catalog_hash: reviewCatalogHashAfter,
       recorded_at: new Date().toISOString()
     });
 
-    // 13) Audit
+    // 14) Audit
     await appendAuditEvent({
       action: 'use',
       from: opts.previousProvider ?? null,
@@ -195,12 +250,16 @@ export async function applyProviderSwitch(provider, opts = {}) {
       auth_hash_after: authHashAfter,
       env_hash_before: envHashBefore,
       env_hash_after: envHashAfter,
+      review_catalog_path: reviewCatalogPath,
+      review_catalog_hash_before: reviewCatalogHashBefore,
+      review_catalog_hash_after: reviewCatalogHashAfter,
+      review_catalog_status: catalogResult.status,
       backup_dir: backupDir,
       chatgpt_backup: chatgptBackupPath,
       drift
     });
 
-    // 14) Prune old backups (best-effort)
+    // 15) Prune old backups (best-effort)
     try {
       await pruneBackups(opts.retention || {});
     } catch {
@@ -213,15 +272,18 @@ export async function applyProviderSwitch(provider, opts = {}) {
       backupDir,
       chatgptBackupPath,
       drift,
+      reviewCatalog: catalogResult,
       hashesBefore: {
         config_toml: configHashBefore,
         auth_json: authHashBefore,
-        env_file: envHashBefore
+        env_file: envHashBefore,
+        review_catalog: reviewCatalogHashBefore
       },
       hashesAfter: {
         config_toml: configHashAfter,
         auth_json: authHashAfter,
-        env_file: envHashAfter
+        env_file: envHashAfter,
+        review_catalog: reviewCatalogHashAfter
       }
     };
   } finally {

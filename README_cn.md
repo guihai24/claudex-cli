@@ -471,6 +471,7 @@ codexx add
 # > Base URL: https://openrouter.ai/api/v1
 # > API Key: sk-or-v1-...
 # > Model: anthropic/claude-sonnet-4.5
+# > 自动审批模型（回车 = 跟随主模型）：
 # > Wire API (chat/responses) [chat]: chat
 
 # 或非交互：
@@ -478,6 +479,7 @@ codexx add --name openrouter \
   --base-url https://openrouter.ai/api/v1 \
   --api-key sk-or-v1-... \
   --model anthropic/claude-sonnet-4.5 \
+  --review-model main \
   --wire-api chat
 
 # 4) 切换
@@ -485,7 +487,10 @@ codexx use openrouter
 # ✅ 已切换到服务商: openrouter
 #    接入点: https://openrouter.ai/api/v1
 #    模型: anthropic/claude-sonnet-4.5
+#    自动审批模型: anthropic/claude-sonnet-4.5（跟随主模型）
+#    审批 Catalog: 已同步
 #    备份: ~/.config/claudex-cli/codex-backups/2026-05-17T.../
+# ℹ️ Codex 的审批 catalog 仅在启动时加载，切换后请完全重启 Codex。
 
 # 5) 像平时一样用 codex
 codexx
@@ -507,6 +512,7 @@ codexx revert
 | `codexx add / list / edit / remove` | provider 增删改查；`edit` 逐字段补丁（回车保留 wizard，或 `--model X` 单字段命令）|
 | `codexx test [name]` | 按 `wire_api` 选 chat / responses 做 HTTP 探测 |
 | `codexx status` | 当前 provider + Codex 版本 + 桌面 App 状态 + drift |
+| `codexx sync-review [model]` | 在桌面端模型选择器换模型后，重新同步 Codex 自动审批 catalog |
 | `codexx doctor [--json]` | 健康检查（CLI 版本、drift、env 冲突、项目级 config、credentials store…）|
 | `codexx menu` | 交互菜单——与 `claudex menu` UX 形态相同 |
 | `codexx snapshot / restore / revert` | 首次快照 + 每次切换前备份 + 原子还原 |
@@ -523,11 +529,12 @@ graph LR
     B --> C[读取 before 状态 + hash]
     C --> D[drift 检测 vs last-known]
     D --> E[计算目标: TOML 外科手术 + auth payload]
-    E --> F[备份 config.toml + auth.json]
-    F --> G[原子写 auth.json]
-    G --> H[原子写 config.toml]
-    H --> I[写后验证非 claudex 部分未动]
-    I --> J[更新 last-known hash + 审计日志]
+    E --> F[备份 config.toml + auth.json + 审批 catalog]
+    F --> G[同步 catalog 自动审批模型]
+    G --> H[原子写 auth.json]
+    H --> I[原子写 config.toml]
+    I --> J[写后验证非 claudex 部分未动]
+    J --> K[更新 last-known hash + 审计日志]
 ```
 
 关键设计决策：
@@ -535,6 +542,7 @@ graph LR
 - **字符串级外科手术，不做 round-trip**。Node 生态没有保留注释/格式的 TOML writer。`codexx` 只改自己 marker 定界的 section，文件里其它字节（你的注释、MCP servers、project trusts、plugins、marketplaces）**保持字节级一致**。
 - **每个 claudex section 写 `requires_openai_auth = true` + `env_key = "OPENAI_API_KEY"`**，让 Codex 的 AuthManager 不论从哪种方式启动都能从 `auth.json` 拿到 key（terminal、桌面 App、VS Code 扩展）。
 - **双文件原子写 + 回滚**。先写 `auth.json`，`config.toml` 写失败时回滚 auth 写入。
+- **自动审批 catalog 同步**。provider 可设置 `auto_review_model`；不设置时自动跟随主模型。`codexx use` 会让主模型 catalog 条目指向审批模型，必要时创建隐藏的审批条目，并备份 catalog。Codex 的 `model_catalog_json` 只在 app-server 启动时加载，因此仍需完全重启。
 - **首次快照 + 每次切换备份**。`codexx revert` 永远能字节级回到 pre-codexx 状态。
 
 ### 命令
@@ -552,6 +560,7 @@ codexx use <name|index>             # 切换 provider
 codexx remove <name|index> [--yes]
 codexx test [name|index]            # 连通性探测
 codexx status                       # 当前 provider + Codex/App 状态
+codexx sync-review [model]          # 桌面端换模型后同步自动审批 catalog
 codexx doctor [--json] [--provider <name>]
 codexx snapshot                     # 创建 pre-codexx 快照
 codexx restore <id|latest>          # 还原某次备份
@@ -570,10 +579,11 @@ codexx login / logout / app         # claudex-aware codex 包装
 |---|---|---|
 | `~/.codex/config.toml` | 与 codex 共享 | codexx 只写 `[model_providers.claudex-<name>]` section 和顶层 `model` / `model_provider`，定界符包裹 |
 | `~/.codex/auth.json` | 与 codex 共享 | codexx 写当前 provider 的 API key（apikey 模式）；ChatGPT OAuth tokens 覆盖前自动备份 |
+| `model_catalog_json` 指向的 catalog | 与 codex 共享 | 配置后 codexx 让主模型条目的 `auto_review_model_override` 指向审批模型；catalog 路径和内容一并进入备份 |
 | `~/.config/claudex-cli/codex-providers/<name>.json` | codexx | provider 元数据（api_key, base_url, model 等）；chmod 600 |
 | `~/.config/claudex-cli/codex-current-provider` | codexx | 单行 = 当前 provider 名 |
 | `~/.config/claudex-cli/codex-snapshot/pre-claudex/` | codexx | 第一次 `codexx use` 时拷的 `~/.codex/` 字节级副本 |
-| `~/.config/claudex-cli/codex-backups/<ts>/` | codexx | 每次切换前备份（config.toml + auth.json + reason + hashes）|
+| `~/.config/claudex-cli/codex-backups/<ts>/` | codexx | 每次切换前备份（config.toml + auth.json + .env + 已配置时的审批 catalog + reason + hashes）|
 | `~/.config/claudex-cli/codex-audit.log` | codexx | JSONL 审计日志（use / revert / drift / chatgpt-backup 事件）|
 | `~/.config/claudex-cli/codex-last-known-hashes.json` | codexx | drift 检测基线 |
 
@@ -586,6 +596,7 @@ Provider 元数据 schema：
   "base_url": "https://openrouter.ai/api/v1",
   "api_key": "sk-or-v1-...",
   "model": "anthropic/claude-sonnet-4.5",
+  "auto_review_model": "anthropic/claude-sonnet-4.5",
   "wire_api": "chat",
   "model_reasoning_effort": "medium",
   "http_headers": { "X-Title": "claudex" }
@@ -596,7 +607,7 @@ Provider 元数据 schema：
 
 | 组件 | 状态 |
 |---|---|
-| codex CLI | 各版本均支持；**v0.130+** 支持 config 热重载（更老版本切换后需重启 codex）|
+| codex CLI | 各版本均支持；v0.130+ 可热重载 provider 配置，但自动审批 catalog 改动后仍需完全重启 |
 | Codex 桌面 App | 与 CLI 同样读 `config.toml` + `auth.json`；自定义 provider 的 UI 模型选择器可能显示 "Custom"（上游 cosmetic 问题 [#19694](https://github.com/openai/codex/issues/19694)，请求路由正常）|
 | Codex VS Code 扩展 | 同样读这些文件；新会话默认 model 在某些情况下有 bug（上游 [#4558](https://github.com/openai/codex/issues/4558)）|
 | ChatGPT 订阅 | 可共存——`codexx` 在覆盖前自动备份 OAuth tokens；`codexx restore-chatgpt` 一键还原 |
@@ -614,6 +625,9 @@ Provider 元数据 schema：
 
 **`codexx use` 之后桌面 App 还用着旧 provider**
 → codex < v0.130 不支持热重载 config。重启桌面 App（Cmd+Q 后重开）。v0.130+ 会自动生效。
+
+**切换后自动审批仍使用旧模型或报错**
+→ 完全重启 Codex，让 `model_catalog_json` 重新加载，再运行 `codexx status` 核对。如果你是在桌面端模型选择器直接换的模型，需要先运行 `codexx sync-review <模型slug>` 再重启。
 
 **`codexx test` 返回 401**
 → 要么 API key 错，要么你 shell 里设了 `OPENAI_API_KEY` 等于另一个值（terminal 启动的 codex 会优先用 shell env 而不是 auth.json）。`codexx doctor` 会把这个标为 `shell_env_conflict`。

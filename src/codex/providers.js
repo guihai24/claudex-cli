@@ -160,7 +160,8 @@ export function normalizeBaseUrl(input) {
 /**
  * Patch an existing provider's metadata.
  * Updates can include any user-editable field: base_url, api_key, model,
- * wire_api, model_reasoning_effort, http_headers, disable_response_storage.
+ * auto_review_model, wire_api, model_reasoning_effort, http_headers,
+ * disable_response_storage.
  *
  * Immutable fields (name, schema_version, created_at) are silently ignored
  * if passed in updates.
@@ -223,6 +224,13 @@ function validateProviderShape(p) {
   }
   if (typeof p.model !== 'string' || p.model.length === 0) {
     throw new Error('model is required');
+  }
+  if (
+    p.auto_review_model !== undefined &&
+    p.auto_review_model !== null &&
+    (typeof p.auto_review_model !== 'string' || p.auto_review_model.trim().length === 0)
+  ) {
+    throw new Error('auto_review_model must be a non-empty model slug or null');
   }
   if (p.wire_api !== undefined && p.wire_api !== 'chat' && p.wire_api !== 'responses') {
     throw new Error(`wire_api must be "chat" or "responses" (got "${p.wire_api}")`);

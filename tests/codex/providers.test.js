@@ -119,6 +119,25 @@ test('writeProvider: rejects bad model_reasoning_effort', async () => {
   );
 });
 
+test('writeProvider: accepts an optional auto-review model', async () => {
+  const dir = await mktemp();
+  await writeProvider({ ...VALID_PROVIDER, auto_review_model: 'review-cheap' }, { dir });
+  const back = await readProvider('openrouter', { dir });
+  assert.equal(back.auto_review_model, 'review-cheap');
+});
+
+test('writeProvider: rejects an empty or non-string auto-review model', async () => {
+  const dir = await mktemp();
+  await assert.rejects(
+    () => writeProvider({ ...VALID_PROVIDER, auto_review_model: '  ' }, { dir }),
+    /auto_review_model/
+  );
+  await assert.rejects(
+    () => writeProvider({ ...VALID_PROVIDER, auto_review_model: 42 }, { dir }),
+    /auto_review_model/
+  );
+});
+
 // ===== read / list / remove =====
 
 test('readProvider: throws if missing', async () => {

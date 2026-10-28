@@ -64,6 +64,8 @@ export async function writeLastKnownHashes(hashes, opts = {}) {
     auth_json_hash: hashes.auth_json_hash || null,
     env_file_hash: hashes.env_file_hash || null,
     agents_md_hash: hashes.agents_md_hash || null,
+    review_catalog_path: hashes.review_catalog_path || null,
+    review_catalog_hash: hashes.review_catalog_hash || null,
     recorded_at: hashes.recorded_at || new Date().toISOString()
   };
   await ensureDir(path.dirname(file));
